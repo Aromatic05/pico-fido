@@ -27,9 +27,18 @@
 #include "mbedtls/ecp.h"
 #include "mbedtls/ecdh.h"
 
+/* USB application enablement is transport-scoped; BLE has its own lifecycle. */
+typedef enum fido_transport {
+    FIDO_TRANSPORT_USB = 0,
+    FIDO_TRANSPORT_BLE = 1,
+} fido_transport_t;
+
 extern uint8_t *driver_prepare_response();
 extern void driver_exec_finished(size_t size_next);
 extern int cbor_process(uint8_t, const uint8_t *data, size_t len);
+extern int cbor_process_to(uint8_t, const uint8_t *data, size_t len, uint8_t *response,
+                           fido_transport_t transport);
+extern uint8_t *cbor_response;
 extern const uint8_t aaguid[16];
 
 extern const bool _btrue, _bfalse;
