@@ -27,7 +27,7 @@
 int cbor_get_info() {
     CborEncoder encoder, mapEncoder, arrayEncoder, mapEncoder2;
     CborError error = CborNoError;
-    cbor_encoder_init(&encoder, ctap_resp->init.data + 1, CTAP_MAX_CBOR_PAYLOAD, 0);
+    cbor_encoder_init(&encoder, cbor_response + 1, CTAP_MAX_CBOR_PAYLOAD, 0);
     uint8_t lfields = 14;
 #ifndef ENABLE_EMULATION
     if (phy_data.vid != 0x1050) {
@@ -200,6 +200,6 @@ err:
     if (error != CborNoError) {
         return -CTAP2_ERR_INVALID_CBOR;
     }
-    res_APDU_size = (uint16_t)cbor_encoder_get_buffer_size(&encoder, ctap_resp->init.data + 1);
+    res_APDU_size = (uint16_t)cbor_encoder_get_buffer_size(&encoder, cbor_response + 1);
     return 0;
 }

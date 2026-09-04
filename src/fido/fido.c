@@ -20,6 +20,7 @@
 #include "kek.h"
 #include "apdu.h"
 #include "ctap.h"
+#include "ctap2_cbor.h"
 #include "files.h"
 #include "usb.h"
 #include "random.h"
@@ -539,34 +540,40 @@ extern int cmd_authenticate();
 extern int cmd_version();
 extern int cbor_parse(int, uint8_t *, size_t);
 extern int cbor_vendor(const uint8_t *data, size_t len);
-extern void driver_init_hid();
 
 #define CTAP_CBOR 0x10
 
-int cmd_vendor() {
+static uint8_t apdu_cbor_response[USB_BUFFER_SIZE];
+
+static int process_cbor_apdu(int cmd) {
     uint8_t *old_buf = res_APDU;
-    driver_init_hid();
-    int ret = cbor_vendor(apdu.data, apdu.nc);
+    uint8_t *old_cbor_response = cbor_response;
+    uint16_t old_len = res_APDU_size;
+
+    cbor_response = apdu_cbor_response;
+    cbor_response[0] = 0;
+    res_APDU = cbor_response + 1;
+    res_APDU_size = 0;
+    int ret = cmd == CTAP_VENDOR_CBOR ? cbor_vendor(apdu.data, apdu.nc) : cbor_parse(cmd, apdu.data, apdu.nc);
+    uint16_t response_len = res_APDU_size + 1;
+
     res_APDU = old_buf;
+    res_APDU_size = old_len;
+    cbor_response = old_cbor_response;
     if (ret != 0) {
         return set_res_sw(0x64, ret);
     }
-    res_APDU_size += 1;
-    memcpy(res_APDU, ctap_resp->init.data, res_APDU_size);
+    memcpy(res_APDU, apdu_cbor_response, response_len);
+    res_APDU_size = response_len;
     return SW_OK();
 }
 
+int cmd_vendor() {
+    return process_cbor_apdu(CTAP_VENDOR_CBOR);
+}
+
 int cmd_cbor() {
-    uint8_t *old_buf = res_APDU;
-    driver_init_hid();
-    int ret = cbor_parse(0x90, apdu.data, apdu.nc);
-    res_APDU = old_buf;
-    if (ret != 0) {
-        return set_res_sw(0x64, ret);
-    }
-    res_APDU_size += 1;
-    memcpy(res_APDU, ctap_resp->init.data, res_APDU_size);
-    return SW_OK();
+    return process_cbor_apdu(0x90);
 }
 
 static const cmd_t cmds[] = {

@@ -672,7 +672,7 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
     if (selcred && extensions.largeBlobKey == ptrue && selcred->extensions.largeBlobKey == ptrue) {
         lfields++;
     }
-    cbor_encoder_init(&encoder, ctap_resp->init.data + 1, CTAP_MAX_CBOR_PAYLOAD, 0);
+    cbor_encoder_init(&encoder, cbor_response + 1, CTAP_MAX_CBOR_PAYLOAD, 0);
     CBOR_CHECK(cbor_encoder_create_map(&encoder, &mapEncoder, lfields));
 
     CBOR_CHECK(cbor_encode_uint(&mapEncoder, 0x01));
@@ -736,7 +736,7 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
     }
     mbedtls_platform_zeroize(largeBlobKey, sizeof(largeBlobKey));
     CBOR_CHECK(cbor_encoder_close_container(&encoder, &mapEncoder));
-    resp_size = cbor_encoder_get_buffer_size(&encoder, ctap_resp->init.data + 1);
+    resp_size = cbor_encoder_get_buffer_size(&encoder, cbor_response + 1);
     ctr++;
     file_put_data(ef_counter, (uint8_t *) &ctr, sizeof(ctr));
     low_flash_available();

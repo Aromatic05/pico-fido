@@ -50,6 +50,7 @@ const uint8_t aaguid[16] = { 0x89, 0xFB, 0x94, 0xB7, 0x06, 0xC9, 0x36, 0x73, 0x9
 const uint8_t *cbor_data = NULL;
 size_t cbor_len = 0;
 uint8_t cbor_cmd = 0;
+uint8_t *cbor_response = NULL;
 
 int cbor_parse(uint8_t cmd, const uint8_t *data, size_t len) {
     if (len == 0 && cmd == CTAPHID_CBOR) {
@@ -142,14 +143,19 @@ void *cbor_thread(void *arg) {
     return NULL;
 }
 
-int cbor_process(uint8_t last_cmd, const uint8_t *data, size_t len) {
+int cbor_process_to(uint8_t last_cmd, const uint8_t *data, size_t len, uint8_t *response) {
     cbor_data = data;
     cbor_len = len;
     cbor_cmd = last_cmd;
-    ctap_resp->init.data[0] = 0;
-    res_APDU = ctap_resp->init.data + 1;
+    cbor_response = response;
+    cbor_response[0] = 0;
+    res_APDU = cbor_response + 1;
     res_APDU_size = 0;
     return 2; // CBOR processing
+}
+
+int cbor_process(uint8_t last_cmd, const uint8_t *data, size_t len) {
+    return cbor_process_to(last_cmd, data, len, ctap_resp->init.data);
 }
 
 CborError COSE_key_params(int crv, int alg, mbedtls_ecp_group *grp, mbedtls_ecp_point *Q, CborEncoder *mapEncoderParent, CborEncoder *mapEncoder) {
