@@ -88,7 +88,9 @@ int oath_select(app_t *a, uint8_t force) {
         res_APDU[res_APDU_size++] = TAG_NAME;
         res_APDU[res_APDU_size++] = 8;
         memcpy(res_APDU + res_APDU_size, pico_serial_str, 8); res_APDU_size += 8;
-        if (file_has_data(search_dynamic_file(EF_OATH_CODE)) == true) {
+        file_t *oath_code = search_dynamic_file(EF_OATH_CODE);
+        validated = !file_has_data(oath_code);
+        if (!validated) {
             random_gen(NULL, challenge, sizeof(challenge));
             res_APDU[res_APDU_size++] = TAG_CHALLENGE;
             res_APDU[res_APDU_size++] = sizeof(challenge);
