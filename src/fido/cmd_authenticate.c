@@ -34,6 +34,9 @@ int cmd_authenticate() {
     if (req->keyHandleLen < KEY_HANDLE_LEN) {
         return SW_INCORRECT_PARAMS();
     }
+    if (apdu.nc != CTAP_CHAL_SIZE + CTAP_APPID_SIZE + 1 + req->keyHandleLen) {
+        return SW_WRONG_LENGTH();
+    }
     if (P1(apdu) == CTAP_AUTH_ENFORCE && wait_button_pressed() == true) {
         return SW_CONDITIONS_NOT_SATISFIED();
     }
@@ -41,7 +44,7 @@ int cmd_authenticate() {
     mbedtls_ecp_keypair key;
     mbedtls_ecp_keypair_init(&key);
     int ret = 0;
-    uint8_t *tmp_kh = (uint8_t *) calloc(1, req->keyHandleLen);
+    uint8_t tmp_kh[CTAP_MAX_KH_SIZE];
     memcpy(tmp_kh, req->keyHandle, req->keyHandleLen);
     if (credential_verify(tmp_kh, req->keyHandleLen, req->appId, false) == 0) {
         ret = fido_load_key(FIDO2_CURVE_P256, req->keyHandle, &key);
@@ -50,11 +53,9 @@ int cmd_authenticate() {
         ret = derive_key(req->appId, false, req->keyHandle, MBEDTLS_ECP_DP_SECP256R1, &key);
         if (verify_key(req->appId, req->keyHandle, &key) != 0) {
             mbedtls_ecp_keypair_free(&key);
-            free(tmp_kh);
             return SW_INCORRECT_PARAMS();
         }
     }
-    free(tmp_kh);
     if (ret != PICOKEY_OK) {
         mbedtls_ecp_keypair_free(&key);
         return SW_EXEC_ERROR();

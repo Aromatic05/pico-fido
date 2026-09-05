@@ -188,9 +188,12 @@ err:
 int credential_load(const uint8_t *cred_id, size_t cred_id_len, const uint8_t *rp_id_hash, Credential *cred) {
     int ret = 0;
     CborError error = CborNoError;
-    uint8_t *copy_cred_id = (uint8_t *) calloc(1, cred_id_len);
-    if (!cred) {
+    uint8_t copy_cred_id[MAX_CRED_ID_LENGTH];
+    if (!cred || !cred_id || !rp_id_hash) {
         CBOR_ERROR(CTAP2_ERR_INVALID_CREDENTIAL);
+    }
+    if (cred_id_len > sizeof(copy_cred_id)) {
+        CBOR_ERROR(CTAP2_ERR_LIMIT_EXCEEDED);
     }
     memset(cred, 0, sizeof(Credential));
     memcpy(copy_cred_id, cred_id, cred_id_len);
@@ -270,11 +273,14 @@ int credential_load(const uint8_t *cred_id, size_t cred_id_len, const uint8_t *r
     }
     cred->id.present = true;
     cred->id.data = (uint8_t *) calloc(1, cred_id_len);
+    if (cred->id.data == NULL && cred_id_len != 0) {
+        error = CTAP2_ERR_PROCESSING;
+        goto err;
+    }
     memcpy(cred->id.data, cred_id, cred_id_len);
     cred->id.len = cred_id_len;
     cred->present = true;
 err:
-    free(copy_cred_id);
     if (error != CborNoError) {
         if (error == CborErrorImproperValue) {
             return CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
@@ -298,6 +304,15 @@ void credential_free(Credential *cred) {
         cred->extensions.present = false;
         cred->opts.present = false;
     }
+}
+
+void credential_move(Credential *dst, Credential *src) {
+    if (!dst || !src || dst == src) {
+        return;
+    }
+    credential_free(dst);
+    *dst = *src;
+    memset(src, 0, sizeof(*src));
 }
 
 int credential_store(const uint8_t *cred_id, size_t cred_id_len, const uint8_t *rp_id_hash) {
@@ -336,17 +351,22 @@ int credential_store(const uint8_t *cred_id, size_t cred_id_len, const uint8_t *
         credential_free(&rcred);
     }
     if (sloti == -1) {
+        credential_free(&cred);
         return -1;
     }
+    uint8_t data[PICO_KEYS_FLASH_SECTOR_SIZE];
     uint8_t cred_idr[CRED_RESIDENT_LEN] = {0};
     credential_derive_resident(cred_id, cred_id_len, cred_idr);
-    uint8_t *data = (uint8_t *) calloc(1, cred_id_len + 32 + CRED_RESIDENT_LEN);
+    size_t record_len = cred_id_len + 32 + CRED_RESIDENT_LEN;
+    if (record_len > sizeof(data)) {
+        credential_free(&cred);
+        return -1;
+    }
     memcpy(data, rp_id_hash, 32);
     memcpy(data + 32, cred_idr, CRED_RESIDENT_LEN);
     memcpy(data + 32 + CRED_RESIDENT_LEN, cred_id, cred_id_len);
     file_t *ef = file_new((uint16_t)(EF_CRED + sloti));
-    file_put_data(ef, data, (uint16_t)cred_id_len + 32 + CRED_RESIDENT_LEN);
-    free(data);
+    file_put_data(ef, data, (uint16_t)record_len);
 
     if (new_record == true) { //increase rps
         sloti = -1;
@@ -364,24 +384,30 @@ int credential_store(const uint8_t *cred_id, size_t cred_id_len, const uint8_t *
             }
         }
         if (sloti == -1) {
+            credential_free(&cred);
             return -1;
         }
         ef = search_dynamic_file((uint16_t)(EF_RP + sloti));
         if (file_has_data(ef)) {
-            data = (uint8_t *) calloc(1, file_get_size(ef));
+            if (file_get_size(ef) > sizeof(data)) {
+                credential_free(&cred);
+                return -1;
+            }
             memcpy(data, file_get_data(ef), file_get_size(ef));
             data[0] += 1;
             file_put_data(ef, data, file_get_size(ef));
-            free(data);
         }
         else {
             ef = file_new((uint16_t)(EF_RP + sloti));
-            data = (uint8_t *) calloc(1, 1 + 32 + cred.rpId.len);
+            size_t rp_record_len = 1 + 32 + cred.rpId.len;
+            if (rp_record_len > sizeof(data)) {
+                credential_free(&cred);
+                return -1;
+            }
             data[0] = 1;
             memcpy(data + 1, rp_id_hash, 32);
             memcpy(data + 1 + 32, cred.rpId.data, cred.rpId.len);
-            file_put_data(ef, data, (uint16_t)(1 + 32 + cred.rpId.len));
-            free(data);
+            file_put_data(ef, data, (uint16_t)rp_record_len);
         }
     }
     credential_free(&cred);

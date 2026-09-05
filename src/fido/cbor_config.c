@@ -40,7 +40,7 @@ int cbor_config(const uint8_t *data, size_t len) {
     CborError error = CborNoError;
     uint64_t subcommand = 0, pinUvAuthProtocol = 0, vendorCommandId = 0, newMinPinLength = 0, vendorParamInt = 0;
     CborByteString pinUvAuthParam = { 0 }, vendorParamByteString = { 0 };
-    CborCharString minPinLengthRPIDs[32] = { 0 }, vendorParamTextString = { 0 };
+    CborCharString minPinLengthRPIDs[MAX_MINPIN_RPIDS] = { 0 }, vendorParamTextString = { 0 };
     size_t resp_size = 0, raw_subpara_len = 0, minPinLengthRPIDs_len = 0;
     CborEncoder encoder;
     //CborEncoder mapEncoder;
@@ -93,7 +93,7 @@ int cbor_config(const uint8_t *data, size_t len) {
                         {
                             CBOR_FIELD_GET_TEXT(minPinLengthRPIDs[minPinLengthRPIDs_len], 3);
                             minPinLengthRPIDs_len++;
-                            if (minPinLengthRPIDs_len >= 32) {
+                            if (minPinLengthRPIDs_len >= MAX_MINPIN_RPIDS) {
                                 CBOR_ERROR(CTAP2_ERR_KEY_STORE_FULL);
                             }
                         }
@@ -128,13 +128,15 @@ int cbor_config(const uint8_t *data, size_t len) {
         CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
     }
 
-    uint8_t *verify_payload = (uint8_t *) calloc(1, 32 + 1 + 1 + raw_subpara_len);
+    if (raw_subpara_len > MAX_MSG_SIZE) {
+        CBOR_ERROR(CTAP2_ERR_LIMIT_EXCEEDED);
+    }
+    uint8_t verify_payload[34 + MAX_MSG_SIZE] = {0};
     memset(verify_payload, 0xff, 32);
     verify_payload[32] = 0x0d;
     verify_payload[33] = (uint8_t)subcommand;
     memcpy(verify_payload + 34, raw_subpara, raw_subpara_len);
     error = verify((uint8_t)pinUvAuthProtocol, paut.data, verify_payload, (uint16_t)(32 + 1 + 1 + raw_subpara_len), pinUvAuthParam.data);
-    free(verify_payload);
     if (error != CborNoError) {
         CBOR_ERROR(CTAP2_ERR_PIN_AUTH_INVALID);
     }
@@ -224,15 +226,15 @@ int cbor_config(const uint8_t *data, size_t len) {
         else if (vendorCommandId == CTAP_CONFIG_PIN_POLICY) {
             file_t *ef_pin_policy = file_new(EF_PIN_COMPLEXITY_POLICY);
             if (ef_pin_policy) {
-                uint8_t *val = calloc(1, 2 + vendorParamByteString.len);
-                if (val) {
-                    // Not ready yet for integer param
-                    // val[0] = (uint8_t)(vendorParamInt >> 8);
-                    // val[1] = (uint8_t)(vendorParamInt & 0xFF);
-                    memcpy(val + 2, vendorParamByteString.data, vendorParamByteString.len);
-                    file_put_data(ef_pin_policy, val, 2 + (uint16_t)vendorParamByteString.len);
-                    free(val);
+                if (vendorParamByteString.len > MAX_MSG_SIZE) {
+                    CBOR_ERROR(CTAP2_ERR_LIMIT_EXCEEDED);
                 }
+                uint8_t val[2 + MAX_MSG_SIZE] = {0};
+                // Not ready yet for integer param
+                // val[0] = (uint8_t)(vendorParamInt >> 8);
+                // val[1] = (uint8_t)(vendorParamInt & 0xFF);
+                memcpy(val + 2, vendorParamByteString.data, vendorParamByteString.len);
+                file_put_data(ef_pin_policy, val, 2 + (uint16_t)vendorParamByteString.len);
             }
             low_flash_available();
         }
@@ -268,7 +270,7 @@ int cbor_config(const uint8_t *data, size_t len) {
             resetPersistentPinUvAuthToken();
             resetPinUvAuthToken();
         }
-        uint8_t *dataf = (uint8_t *) calloc(1, 2 + minPinLengthRPIDs_len * 32);
+        uint8_t dataf[2 + MAX_MINPIN_RPIDS * 32] = {0};
         dataf[0] = (uint8_t)newMinPinLength;
         dataf[1] = forceChangePin == ptrue ? 1 : 0;
         for (size_t m = 0; m < minPinLengthRPIDs_len; m++) {
@@ -276,7 +278,6 @@ int cbor_config(const uint8_t *data, size_t len) {
         }
         file_put_data(ef_minpin, dataf, (uint16_t)(2 + minPinLengthRPIDs_len * 32));
         low_flash_available();
-        free(dataf);
         goto err; //No return
     }
     else if (subcommand == 0x01) {
