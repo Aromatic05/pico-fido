@@ -74,12 +74,9 @@ uint8_t fido_get_version_minor() {
 
 int fido_select(app_t *a, uint8_t force) {
     (void) force;
-    if (cap_supported(CAP_FIDO2)) {
-        a->process_apdu = fido_process_apdu;
-        a->unload = fido_unload;
-        return PICOKEY_OK;
-    }
-    return PICOKEY_ERR_FILE_NOT_FOUND;
+    a->process_apdu = fido_process_apdu;
+    a->unload = fido_unload;
+    return PICOKEY_OK;
 }
 
 extern uint8_t (*get_version_major)();

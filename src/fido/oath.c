@@ -124,6 +124,8 @@ INITIALIZER ( oath_ctor ) {
 }
 
 int oath_unload() {
+    validated = false;
+    memset(challenge, 0, sizeof(challenge));
     return PICOKEY_OK;
 }
 
