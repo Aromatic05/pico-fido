@@ -103,6 +103,7 @@ void append_keyboard_buffer(const uint8_t *buf, size_t len) {}
 #define CFGFLAG_UPDATE_MASK (PACING_10MS | PACING_20MS)
 
 static uint8_t config_seq = { 1 };
+static uint16_t config_seq_pending = 0;
 
 PACK(
 typedef struct otp_config {
@@ -372,6 +373,18 @@ uint16_t otp_status_ext() {
     return SW_OK();
 }
 
+static uint16_t otp_config_commit_status(bool is_otp) {
+    config_seq_pending++;
+    return otp_status(is_otp);
+}
+
+static void otp_publish_committed_config(void) {
+    if (config_seq_pending > 0 && !low_flash_is_pending()) {
+        config_seq = (uint8_t)(config_seq + config_seq_pending);
+        config_seq_pending = 0;
+    }
+}
+
 uint16_t otp_status(bool is_otp) {
     if (scanned == false) {
         scan_all();
@@ -444,14 +457,12 @@ int cmd_otp() {
                 memset(apdu.data + otp_config_size, 0, 8); // Add 8 bytes extra
                 file_put_data(ef, apdu.data, otp_config_size + 8);
                 low_flash_available();
-                config_seq++;
-                return otp_status(_is_otp);
+                return otp_config_commit_status(_is_otp);
             }
         }
         // Delete slot
         delete_file(ef);
-        config_seq++;
-        return otp_status(_is_otp);
+        return otp_config_commit_status(_is_otp);
     }
     else if (p1 == 0x04 || p1 == 0x05) { // Update slot
         otp_config_t *odata = (otp_config_t *) apdu.data;
@@ -483,7 +494,7 @@ int cmd_otp() {
             }
             file_put_data(ef, apdu.data, otp_config_size);
             low_flash_available();
-            config_seq++;
+            return otp_config_commit_status(_is_otp);
         }
         return otp_status(_is_otp);
     }
@@ -519,8 +530,7 @@ int cmd_otp() {
             delete_file(ef2);
         }
         low_flash_available();
-        config_seq++;
-        return otp_status(_is_otp);
+        return otp_config_commit_status(_is_otp);
     }
     else if (p1 == 0x10) {
         memcpy(res_APDU, pico_serial.id, 4);
@@ -528,7 +538,20 @@ int cmd_otp() {
         res_APDU_size = 4;
     }
     else if (p1 == 0x13) { // Get config
-        man_get_config();
+        if (man_get_config() != 0) {
+            return SW_WRONG_DATA();
+        }
+    }
+    else if (p1 == 0x15) { // Set device info
+        uint16_t request_len = (uint16_t)apdu.data[0] + 1;
+        if (request_len > apdu.nc) {
+            return SW_WRONG_LENGTH();
+        }
+        uint16_t sw = man_write_config(apdu.data, request_len);
+        if (sw != 0x9000) {
+            return sw;
+        }
+        return otp_config_commit_status(_is_otp);
     }
     else if (p1 == 0x14) {
         otp_status_ext();
@@ -718,7 +741,13 @@ uint16_t otp_hid_get_report_cb(uint8_t itf,
     }
     else {
         res_APDU = buffer;
+        otp_publish_committed_config();
+        uint8_t old_status = status_byte;
+        if (config_seq_pending > 0 && status_byte == 0) {
+            status_byte = 0x01;
+        }
         otp_status(true);
+        status_byte = old_status;
         DEBUG_DATA(buffer, 8);
     }
 

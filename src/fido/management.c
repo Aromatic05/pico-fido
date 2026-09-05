@@ -349,7 +349,7 @@ uint16_t man_write_config(const uint8_t *request, uint16_t request_len) {
                     return MAN_SW_WRONG_DATA;
                 }
                 const uint16_t management_transports =
-                    CAP_U2F | CAP_FIDO2 | CAP_MANAGEMENT | CAP_OATH | CAP_PIV | CAP_OPENPGP | CAP_HSMAUTH;
+                    CAP_OTP | CAP_U2F | CAP_FIDO2 | CAP_MANAGEMENT | CAP_OATH | CAP_PIV | CAP_OPENPGP | CAP_HSMAUTH;
                 if ((enabled & management_transports) == 0) {
                     return MAN_SW_WRONG_DATA;
                 }
