@@ -537,6 +537,13 @@ int cmd_otp() {
         res_APDU[0] &= ~0xFC; // Force 8-digit serial number
         res_APDU_size = 4;
     }
+    else if (p1 == 0x11) { // Set legacy device mode
+        uint16_t sw = man_write_legacy_mode(apdu.data, (uint16_t)apdu.nc);
+        if (sw != 0x9000) {
+            return sw;
+        }
+        return otp_config_commit_status(_is_otp);
+    }
     else if (p1 == 0x13) { // Get config
         if (man_get_config() != 0) {
             return SW_WRONG_DATA();

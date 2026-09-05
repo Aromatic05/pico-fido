@@ -413,6 +413,47 @@ uint16_t man_write_config(const uint8_t *request, uint16_t request_len) {
 }
 
 extern int cbor_reset();
+uint16_t man_write_legacy_mode(const uint8_t *data, uint16_t data_len) {
+    if (data == NULL || data_len < 4) {
+        return MAN_SW_WRONG_DATA;
+    }
+
+    static const uint16_t mode_caps[] = {
+        CAP_OTP,
+        CAP_MANAGEMENT | CAP_OATH | CAP_PIV | CAP_OPENPGP | CAP_HSMAUTH,
+        CAP_OTP | CAP_MANAGEMENT | CAP_OATH | CAP_PIV | CAP_OPENPGP | CAP_HSMAUTH,
+        CAP_U2F | CAP_FIDO2,
+        CAP_OTP | CAP_U2F | CAP_FIDO2,
+        CAP_U2F | CAP_FIDO2 | CAP_MANAGEMENT | CAP_OATH | CAP_PIV | CAP_OPENPGP | CAP_HSMAUTH,
+        CAP_OTP | CAP_U2F | CAP_FIDO2 | CAP_MANAGEMENT | CAP_OATH | CAP_PIV | CAP_OPENPGP | CAP_HSMAUTH,
+    };
+    uint8_t mode = data[0] & 0x07;
+    if (mode >= sizeof(mode_caps) / sizeof(mode_caps[0])) {
+        return MAN_SW_WRONG_DATA;
+    }
+
+    uint16_t enabled = mode_caps[mode] & man_supported_caps();
+    if (enabled == 0) {
+        return MAN_SW_WRONG_DATA;
+    }
+
+    uint8_t request[15];
+    uint16_t offset = 1;
+    uint8_t tmp[2];
+    put_uint16_t_be(enabled, tmp);
+    offset = man_append_tlv(request, offset, TAG_USB_ENABLED, tmp, 2);
+    offset = man_append_tlv(request, offset, TAG_CHALRESP_TIMEOUT, &data[1], 1);
+
+    uint16_t auto_eject_timeout = (uint16_t)data[2] | ((uint16_t)data[3] << 8);
+    put_uint16_t_be(auto_eject_timeout, tmp);
+    offset = man_append_tlv(request, offset, TAG_AUTO_EJECT_TIMEOUT, tmp, 2);
+
+    uint8_t flags = data[0] & (FLAG_REMOTE_WAKEUP | FLAG_EJECT);
+    offset = man_append_tlv(request, offset, TAG_DEVICE_FLAGS, &flags, 1);
+    request[0] = (uint8_t)(offset - 1);
+    return man_write_config(request, offset);
+}
+
 int cmd_factory_reset() {
     cbor_reset();
     return SW_OK();
