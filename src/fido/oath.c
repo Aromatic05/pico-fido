@@ -66,8 +66,23 @@ extern bool is_nk;
 int oath_process_apdu();
 int oath_unload();
 
-static bool validated = true;
-static uint8_t challenge[CHALLENGE_LEN] = { 0 };
+typedef struct oath_session_state {
+    bool validated;
+    uint8_t challenge[CHALLENGE_LEN];
+} oath_session_state_t;
+
+static oath_session_state_t oath_sessions[APDU_SESSION_COUNT];
+
+static oath_session_state_t *oath_session(void) {
+    return &oath_sessions[apdu_current_session()];
+}
+
+static void oath_set_all_sessions_validated(bool validated) {
+    for (size_t i = 0; i < APDU_SESSION_COUNT; i++) {
+        oath_sessions[i].validated = validated;
+        memset(oath_sessions[i].challenge, 0, sizeof(oath_sessions[i].challenge));
+    }
+}
 
 const uint8_t oath_aid[] = {
     7,
@@ -89,13 +104,13 @@ int oath_select(app_t *a, uint8_t force) {
         res_APDU[res_APDU_size++] = 8;
         memcpy(res_APDU + res_APDU_size, pico_serial_str, 8); res_APDU_size += 8;
         file_t *oath_code = search_dynamic_file(EF_OATH_CODE);
-        validated = !file_has_data(oath_code);
-        if (!validated) {
-            random_gen(NULL, challenge, sizeof(challenge));
+        oath_session()->validated = !file_has_data(oath_code);
+        if (!oath_session()->validated) {
+            random_gen(NULL, oath_session()->challenge, sizeof(oath_session()->challenge));
             res_APDU[res_APDU_size++] = TAG_CHALLENGE;
-            res_APDU[res_APDU_size++] = sizeof(challenge);
-            memcpy(res_APDU + res_APDU_size, challenge, sizeof(challenge));
-            res_APDU_size += sizeof(challenge);
+            res_APDU[res_APDU_size++] = sizeof(oath_session()->challenge);
+            memcpy(res_APDU + res_APDU_size, oath_session()->challenge, sizeof(oath_session()->challenge));
+            res_APDU_size += sizeof(oath_session()->challenge);
             res_APDU[res_APDU_size++] = TAG_ALGO;
             res_APDU[res_APDU_size++] = 1;
             res_APDU[res_APDU_size++] = ALG_HMAC_SHA1;
@@ -124,8 +139,8 @@ INITIALIZER ( oath_ctor ) {
 }
 
 int oath_unload() {
-    validated = false;
-    memset(challenge, 0, sizeof(challenge));
+    oath_session()->validated = false;
+    memset(oath_session()->challenge, 0, sizeof(oath_session()->challenge));
     return PICOKEY_OK;
 }
 
@@ -142,7 +157,7 @@ file_t *find_oath_cred(const uint8_t *name, size_t name_len) {
 }
 
 int cmd_put() {
-    if (validated == false) {
+    if (oath_session()->validated == false) {
         return SW_SECURITY_STATUS_NOT_SATISFIED();
     }
     asn1_ctx_t ctxi, key = { 0 }, name = { 0 }, imf = { 0 };
@@ -190,7 +205,7 @@ int cmd_put() {
 
 
 int cmd_delete() {
-    if (validated == false) {
+    if (oath_session()->validated == false) {
         return SW_SECURITY_STATUS_NOT_SATISFIED();
     }
     asn1_ctx_t ctxi, ctxo = { 0 };
@@ -220,12 +235,12 @@ const mbedtls_md_info_t *get_oath_md_info(uint8_t alg) {
 }
 
 int cmd_set_code() {
-    if (validated == false) {
+    if (oath_session()->validated == false) {
         return SW_SECURITY_STATUS_NOT_SATISFIED();
     }
     if (apdu.nc == 0) {
         delete_file(search_dynamic_file(EF_OATH_CODE));
-        validated = true;
+        oath_set_all_sessions_validated(true);
         return SW_OK();
     }
     asn1_ctx_t ctxi, key = { 0 }, chal = { 0 }, resp = { 0 };
@@ -235,7 +250,7 @@ int cmd_set_code() {
     }
     if (key.len == 0) {
         delete_file(search_dynamic_file(EF_OATH_CODE));
-        validated = true;
+        oath_set_all_sessions_validated(true);
         return SW_OK();
     }
     if (asn1_find_tag(&ctxi, TAG_CHALLENGE, &chal) == false) {
@@ -257,11 +272,11 @@ int cmd_set_code() {
     if (memcmp(hmac, resp.data, resp.len) != 0) {
         return SW_DATA_INVALID();
     }
-    random_gen(NULL, challenge, sizeof(challenge));
+    random_gen(NULL, oath_session()->challenge, sizeof(oath_session()->challenge));
     file_t *ef = file_new(EF_OATH_CODE);
     file_put_data(ef, key.data, key.len);
     low_flash_available();
-    validated = false;
+    oath_set_all_sessions_validated(false);
     return SW_OK();
 }
 
@@ -278,12 +293,12 @@ int cmd_reset() {
     delete_file(search_dynamic_file(EF_OATH_CODE));
     flash_clear_file(search_by_fid(EF_OTP_PIN, NULL, SPECIFY_EF));
     low_flash_available();
-    validated = true;
+    oath_set_all_sessions_validated(true);
     return SW_OK();
 }
 
 int cmd_list() {
-    if (validated == false) {
+    if (oath_session()->validated == false) {
         return SW_SECURITY_STATUS_NOT_SATISFIED();
     }
     bool ext = (apdu.nc == 1 && apdu.data[0] == 0x01);
@@ -325,7 +340,7 @@ int cmd_validate() {
     }
     file_t *ef = search_dynamic_file(EF_OATH_CODE);
     if (file_has_data(ef) == false) {
-        validated = true;
+        oath_session()->validated = true;
         return SW_DATA_INVALID();
     }
     key.data = file_get_data(ef);
@@ -335,7 +350,7 @@ int cmd_validate() {
         return SW_INCORRECT_PARAMS();
     }
     uint8_t hmac[64];
-    int ret = mbedtls_md_hmac(md_info, key.data + 1, key.len - 1, challenge, sizeof(challenge), hmac);
+    int ret = mbedtls_md_hmac(md_info, key.data + 1, key.len - 1, oath_session()->challenge, sizeof(oath_session()->challenge), hmac);
     if (ret != 0) {
         return SW_EXEC_ERROR();
     }
@@ -346,7 +361,7 @@ int cmd_validate() {
     if (ret != 0) {
         return SW_EXEC_ERROR();
     }
-    validated = true;
+    oath_session()->validated = true;
     res_APDU[res_APDU_size++] = TAG_RESPONSE;
     res_APDU[res_APDU_size++] = mbedtls_md_get_size(md_info);
     memcpy(res_APDU + res_APDU_size, hmac, mbedtls_md_get_size(md_info));
@@ -388,7 +403,7 @@ int cmd_calculate() {
     if (P2(apdu) != 0x0 && P2(apdu) != 0x1) {
         return SW_INCORRECT_P1P2();
     }
-    if (validated == false) {
+    if (oath_session()->validated == false) {
         return SW_SECURITY_STATUS_NOT_SATISFIED();
     }
     asn1_ctx_t ctxi, key = { 0 }, chal = { 0 }, name = { 0 };
@@ -445,7 +460,7 @@ int cmd_calculate_all() {
     if (P2(apdu) != 0x0 && P2(apdu) != 0x1) {
         return SW_INCORRECT_P1P2();
     }
-    if (validated == false) {
+    if (oath_session()->validated == false) {
         return SW_SECURITY_STATUS_NOT_SATISFIED();
     }
     if (asn1_find_tag(&ctxi, TAG_CHALLENGE, &chal) == false) {
@@ -555,13 +570,13 @@ int cmd_verify_otp_pin() {
         }
         file_put_data(ef_otp_pin, data_hsh, sizeof(data_hsh));
         low_flash_available();
-        validated = false;
+        oath_session()->validated = false;
         return SW_SECURITY_STATUS_NOT_SATISFIED();
     }
     data_hsh[0] = MAX_OTP_COUNTER;
     file_put_data(ef_otp_pin, data_hsh, sizeof(data_hsh));
     low_flash_available();
-    validated = true;
+    oath_session()->validated = true;
     return SW_OK();
 }
 
@@ -614,7 +629,7 @@ int cmd_verify_hotp() {
 int cmd_rename() {
     asn1_ctx_t ctxi, name = { 0 }, new_name = { 0 };
 
-    if (validated == false) {
+    if (oath_session()->validated == false) {
         return SW_SECURITY_STATUS_NOT_SATISFIED();
     }
     if (apdu.data[0] != TAG_NAME) {
