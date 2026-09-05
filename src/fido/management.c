@@ -21,6 +21,7 @@
 #include "version.h"
 #include "files.h"
 #include "management.h"
+#include "management_usb.h"
 #include "mbedtls/constant_time.h"
 
 bool is_gpg = true;
@@ -59,6 +60,9 @@ int man_unload() {
 }
 
 #define CONFIG_LOCK_LEN 16
+#define MAN_SW_WRONG_DATA 0x6700
+#define MAN_SW_SECURITY_STATUS_NOT_SATISFIED 0x6982
+#define MAN_SW_OK 0x9000
 
 static const uint8_t _openpgp_aid[] = {
     6,
@@ -216,7 +220,7 @@ static int man_store_config(const man_config_t *cfg) {
 }
 
 static uint16_t man_supported_caps(void) {
-    uint16_t caps = CAP_FIDO2 | CAP_OTP | CAP_U2F | CAP_OATH;
+    uint16_t caps = CAP_FIDO2 | CAP_OTP | CAP_U2F | CAP_OATH | CAP_MANAGEMENT;
     if (app_exists(_openpgp_aid + 1, _openpgp_aid[0])) {
         caps |= CAP_OPENPGP;
     }
@@ -226,13 +230,24 @@ static uint16_t man_supported_caps(void) {
     return caps;
 }
 
-bool cap_supported(uint16_t cap) {
+int man_get_usb_config(uint16_t *enabled, bool *configured) {
     man_config_t cfg;
-    if (man_load_config(&cfg) != 0) {
-        return false;
+    if (enabled == NULL || configured == NULL || man_load_config(&cfg) != 0) {
+        return -1;
     }
-    uint16_t enabled = cfg.usb_enabled_set ? cfg.usb_enabled : man_supported_caps();
-    return (enabled & cap) != 0;
+    *configured = cfg.usb_enabled_set;
+    *enabled = cfg.usb_enabled_set ? cfg.usb_enabled : man_supported_caps();
+    return 0;
+}
+
+int man_get_enabled_caps(uint16_t *enabled) {
+    bool configured = false;
+    return man_get_usb_config(enabled, &configured);
+}
+
+bool cap_supported(uint16_t cap) {
+    uint16_t enabled = 0;
+    return man_get_enabled_caps(&enabled) == 0 && (enabled & cap) != 0;
 }
 
 int man_get_config() {
@@ -241,7 +256,10 @@ int man_get_config() {
         return -1;
     }
     uint16_t supported = man_supported_caps();
-    uint16_t enabled = cfg.usb_enabled_set ? cfg.usb_enabled : supported;
+    uint16_t enabled = 0;
+    if (man_get_enabled_caps(&enabled) != 0) {
+        return -1;
+    }
     uint8_t tmp[2];
 
     res_APDU_size = 0;
@@ -293,74 +311,73 @@ int cmd_read_config() {
     return SW_OK();
 }
 
-int cmd_write_config() {
-    if (apdu.nc < 1 || apdu.data[0] != apdu.nc - 1) {
-        return SW_WRONG_DATA();
+uint16_t man_write_config(const uint8_t *request, uint16_t request_len) {
+    if (request_len < 1 || request[0] != request_len - 1) {
+        return MAN_SW_WRONG_DATA;
     }
 
     man_config_t cfg;
     if (man_load_config(&cfg) != 0) {
-        return SW_WRONG_DATA();
+        return MAN_SW_WRONG_DATA;
     }
     man_config_t next = cfg;
     bool unlock_seen = false;
     bool unlock_valid = false;
     bool changed = false;
-#ifndef ENABLE_EMULATION
-    bool usb_changed = false;
-#endif
     uint16_t offset = 0;
-    const uint8_t *buf = apdu.data + 1;
-    uint16_t len = (uint16_t)(apdu.nc - 1);
+    const uint8_t *buf = request + 1;
+    uint16_t len = (uint16_t)(request_len - 1);
 
     while (offset < len) {
         uint8_t tag = 0, tag_len = 0;
         const uint8_t *data = NULL;
         int r = man_tlv_next(buf, len, &offset, &tag, &tag_len, &data);
         if (r <= 0) {
-            return SW_WRONG_DATA();
+            return MAN_SW_WRONG_DATA;
         }
         switch (tag) {
             case TAG_UNLOCK:
-                if (tag_len != CONFIG_LOCK_LEN) return SW_WRONG_DATA();
+                if (tag_len != CONFIG_LOCK_LEN) return MAN_SW_WRONG_DATA;
                 unlock_seen = true;
                 unlock_valid = cfg.config_lock_set &&
                     mbedtls_ct_memcmp(cfg.config_lock, data, CONFIG_LOCK_LEN) == 0;
                 break;
             case TAG_USB_ENABLED: {
-                if (tag_len != 2) return SW_WRONG_DATA();
+                if (tag_len != 2) return MAN_SW_WRONG_DATA;
                 uint16_t enabled = get_uint16_t_be(data);
                 if ((enabled & ~man_supported_caps()) != 0 || enabled == 0) {
-                    return SW_WRONG_DATA();
+                    return MAN_SW_WRONG_DATA;
+                }
+                const uint16_t management_transports =
+                    CAP_U2F | CAP_FIDO2 | CAP_MANAGEMENT | CAP_OATH | CAP_PIV | CAP_OPENPGP | CAP_HSMAUTH;
+                if ((enabled & management_transports) == 0) {
+                    return MAN_SW_WRONG_DATA;
                 }
                 next.usb_enabled_set = true;
                 next.usb_enabled = enabled;
                 changed = true;
-#ifndef ENABLE_EMULATION
-                usb_changed = true;
-#endif
                 break;
             }
             case TAG_AUTO_EJECT_TIMEOUT:
-                if (tag_len != 2) return SW_WRONG_DATA();
+                if (tag_len != 2) return MAN_SW_WRONG_DATA;
                 next.auto_eject_timeout_set = true;
                 next.auto_eject_timeout = get_uint16_t_be(data);
                 changed = true;
                 break;
             case TAG_CHALRESP_TIMEOUT:
-                if (tag_len != 1) return SW_WRONG_DATA();
+                if (tag_len != 1) return MAN_SW_WRONG_DATA;
                 next.chalresp_timeout_set = true;
                 next.chalresp_timeout = data[0];
                 changed = true;
                 break;
             case TAG_DEVICE_FLAGS:
-                if (tag_len != 1) return SW_WRONG_DATA();
+                if (tag_len != 1) return MAN_SW_WRONG_DATA;
                 next.device_flags_set = true;
                 next.device_flags = data[0];
                 changed = true;
                 break;
             case TAG_CONFIG_LOCK:
-                if (tag_len != CONFIG_LOCK_LEN) return SW_WRONG_DATA();
+                if (tag_len != CONFIG_LOCK_LEN) return MAN_SW_WRONG_DATA;
                 if (all_zero(data, tag_len)) {
                     next.config_lock_set = false;
                     memset(next.config_lock, 0, sizeof(next.config_lock));
@@ -372,50 +389,38 @@ int cmd_write_config() {
                 changed = true;
                 break;
             case TAG_REBOOT:
-                if (tag_len != 0) return SW_WRONG_DATA();
+                if (tag_len != 0) return MAN_SW_WRONG_DATA;
                 break;
             default:
-                return SW_WRONG_DATA();
+                return MAN_SW_WRONG_DATA;
         }
     }
 
     if (cfg.config_lock_set && (!unlock_seen || !unlock_valid)) {
-        return SW_SECURITY_STATUS_NOT_SATISFIED();
+        return MAN_SW_SECURITY_STATUS_NOT_SATISFIED;
     }
     if (!cfg.config_lock_set && unlock_seen) {
-        return SW_SECURITY_STATUS_NOT_SATISFIED();
+        return MAN_SW_SECURITY_STATUS_NOT_SATISFIED;
     }
 
     if (changed) {
         int r = man_store_config(&next);
         if (r != PICOKEY_OK) {
-            return SW_WRONG_DATA();
+            return MAN_SW_WRONG_DATA;
         }
     }
-#ifndef ENABLE_EMULATION
-    if (usb_changed) {
-        if (cap_supported(CAP_OTP)) {
-            phy_data.enabled_usb_itf |= PHY_USB_ITF_KB;
-        }
-        else {
-            phy_data.enabled_usb_itf &= ~PHY_USB_ITF_KB;
-        }
-        if (cap_supported(CAP_FIDO2) || cap_supported(CAP_U2F)) {
-            phy_data.enabled_usb_itf |= PHY_USB_ITF_HID;
-        }
-        else {
-            phy_data.enabled_usb_itf &= ~PHY_USB_ITF_HID;
-        }
-        phy_save();
-    }
-#endif
-    return SW_OK();
+    return MAN_SW_OK;
 }
 
 extern int cbor_reset();
 int cmd_factory_reset() {
     cbor_reset();
     return SW_OK();
+}
+
+int cmd_write_config() {
+    uint16_t sw = man_write_config(apdu.data, (uint16_t)apdu.nc);
+    return set_res_sw((uint8_t)(sw >> 8), (uint8_t)sw);
 }
 
 #define INS_READ_CONFIG             0x1D

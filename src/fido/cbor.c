@@ -59,6 +59,26 @@ int cbor_parse(uint8_t cmd, const uint8_t *data, size_t len) {
     if (len > 0) {
         DEBUG_DATA(data + 1, len - 1);
     }
+    if (cmd == CTAP_YUBIKEY_READ_CONFIG) {
+        if (cmd_read_config() == 0x9000) {
+            // Vendor CTAP replies are raw management bytes, not CTAP2 CBOR:
+            // shift over the reserved status byte; cbor_thread adds it back to the length.
+            memmove(cbor_response, res_APDU, res_APDU_size);
+            res_APDU_size -= 1;
+            return 0;
+        }
+        return CTAP1_ERR_INVALID_PARAMETER;
+    }
+    if (cmd == CTAP_YUBIKEY_WRITE_CONFIG) {
+        uint16_t sw = man_write_config(data, (uint16_t)len);
+        if (sw == 0x9000) {
+            return 0;
+        }
+        if (sw == 0x6982) {
+            return CTAP2_ERR_NOT_ALLOWED;
+        }
+        return CTAP1_ERR_INVALID_PARAMETER;
+    }
     if (cap_supported(CAP_FIDO2)) {
         if (cmd == CTAPHID_CBOR) {
             if (data[0] != CTAP_GET_NEXT_ASSERTION) {
@@ -97,13 +117,6 @@ int cbor_parse(uint8_t cmd, const uint8_t *data, size_t len) {
         }
         else if (cmd == CTAP_VENDOR_CBOR) {
             return cbor_vendor(data, len);
-        }
-        else if (cmd == 0xC2) {
-            if (cmd_read_config() == 0x9000) {
-                memmove(res_APDU-1, res_APDU, res_APDU_size);
-                res_APDU_size -= 1;
-                return 0;
-            }
         }
     }
     return CTAP1_ERR_INVALID_CMD;

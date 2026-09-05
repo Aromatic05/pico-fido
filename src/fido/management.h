@@ -18,6 +18,8 @@
 #ifndef _MANAGEMENT_H_
 #define _MANAGEMENT_H_
 
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #if defined(PICO_PLATFORM)
 #include "pico/stdlib.h"
@@ -41,6 +43,7 @@
 #define CAP_OTP 0x01
 #define CAP_U2F 0x02
 #define CAP_FIDO2 0x200
+#define CAP_MANAGEMENT 0x400
 #define CAP_OATH 0x20
 #define CAP_PIV 0x10
 #define CAP_OPENPGP 0x08
@@ -49,7 +52,10 @@
 #define FLAG_REMOTE_WAKEUP 0x40
 #define FLAG_EJECT 0x80
 
+extern int man_get_usb_config(uint16_t *enabled, bool *configured);
+extern int man_get_enabled_caps(uint16_t *enabled);
 extern bool cap_supported(uint16_t cap);
 extern int man_get_config();
+extern uint16_t man_write_config(const uint8_t *request, uint16_t request_len);
 
 #endif //_MANAGEMENT_H
