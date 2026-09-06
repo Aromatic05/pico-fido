@@ -45,7 +45,9 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
     CborByteString kax = { 0 }, kay = { 0 }, salt_enc = { 0 }, salt_auth = { 0 };
     bool hmac_secret_mc = false;
     const bool *pin_complexity_policy = NULL;
-    uint8_t *aut_data = NULL;
+    /* The global card arbiter serializes CBOR workers, so this scratch has one owner. */
+    static uint8_t aut_data[CTAP_MAX_CBOR_PAYLOAD];
+    mbedtls_platform_zeroize(aut_data, sizeof(aut_data));
     size_t resp_size = 0;
     CredExtensions extensions = { 0 };
     //options.present = true;
@@ -192,6 +194,13 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
         }
     }
     CBOR_PARSE_MAP_END(map, 1);
+
+    if (clientDataHash.present == false || rp.id.present == false || user.id.present == false) {
+        CBOR_ERROR(CTAP2_ERR_MISSING_PARAMETER);
+    }
+    if (clientDataHash.len != 32) {
+        CBOR_ERROR(CTAP1_ERR_INVALID_LEN);
+    }
 
     uint8_t flags = FIDO2_AUT_FLAG_AT;
     uint8_t rp_id_hash[32] = {0};
@@ -401,7 +410,8 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
 
     const known_app_t *ka = find_app_by_rp_id_hash(rp_id_hash);
 
-    uint8_t cred_id[MAX_CRED_ID_LENGTH] = {0};
+    static uint8_t cred_id[MAX_CRED_ID_LENGTH];
+    mbedtls_platform_zeroize(cred_id, sizeof(cred_id));
     uint16_t cred_id_len = 0;
 
     CBOR_CHECK(credential_create(&rp.id, &user.id, &user.parent.name, &user.displayName, &options, &extensions, (!ka || ka->use_sign_count == ptrue), alg, curve, cred_id, &cred_id_len));
@@ -540,13 +550,17 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
     }
     size_t olen = 0;
     uint32_t ctr = get_sign_counter();
-    uint8_t cbor_buf[1024] = {0};
+    static uint8_t cbor_buf[1024];
+    mbedtls_platform_zeroize(cbor_buf, sizeof(cbor_buf));
     cbor_encoder_init(&encoder, cbor_buf, sizeof(cbor_buf), 0);
     CBOR_CHECK(COSE_key(&ekey, &encoder, &mapEncoder));
     size_t rs = cbor_encoder_get_buffer_size(&encoder, cbor_buf);
 
     size_t aut_data_len = 32 + 1 + 4 + (16 + 2 + (options.rk == ptrue ? CRED_RESIDENT_LEN : cred_id_len) + rs) + ext_len;
-    aut_data = (uint8_t *) calloc(1, aut_data_len + clientDataHash.len);
+    if (aut_data_len + clientDataHash.len > sizeof(aut_data)) {
+        mbedtls_ecp_keypair_free(&ekey);
+        CBOR_ERROR(CTAP2_ERR_LIMIT_EXCEEDED);
+    }
     uint8_t *pa = aut_data;
     memcpy(pa, rp_id_hash, 32); pa += 32;
     *pa++ = flags;
@@ -680,6 +694,9 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
     file_put_data(ef_counter, (uint8_t *) &ctr, sizeof(ctr));
     low_flash_available();
 err:
+    mbedtls_platform_zeroize(aut_data, sizeof(aut_data));
+    mbedtls_platform_zeroize(cred_id, sizeof(cred_id));
+    mbedtls_platform_zeroize(cbor_buf, sizeof(cbor_buf));
     CBOR_FREE_BYTE_STRING(clientDataHash);
     CBOR_FREE_BYTE_STRING(pinUvAuthParam);
     CBOR_FREE_BYTE_STRING(rp.id);
@@ -704,9 +721,6 @@ err:
         for (size_t n = 0; n < excludeList[m].transports_len; n++) {
             CBOR_FREE_BYTE_STRING(excludeList[m].transports[n]);
         }
-    }
-    if (aut_data) {
-        free(aut_data);
     }
     if (error != CborNoError) {
         if (error == CborErrorImproperValue) {

@@ -39,17 +39,14 @@ uint8_t credentialCounter = 1;
 uint8_t numberOfCredentialsx = 0;
 uint8_t flagsx = 0;
 uint32_t timerx = 0;
-uint8_t *datax = NULL;
+uint8_t datax[CTAP_MAX_CBOR_PAYLOAD];
 size_t lenx = 0;
 
 void reset_gna_state() {
     for (int i = 0; i < MAX_CREDENTIAL_COUNT_IN_LIST; i++) {
         credential_free(&credsx[i]);
     }
-    if (datax) {
-        free(datax);
-        datax = NULL;
-    }
+    mbedtls_platform_zeroize(datax, sizeof(datax));
     lenx = 0;
     residentx = false;
     timerx = 0;
@@ -93,11 +90,16 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
     CborError error = CborNoError;
     CborByteString pinUvAuthParam = { 0 }, clientDataHash = { 0 };
     CborCharString rpId = { 0 };
-    PublicKeyCredentialDescriptor allowList[MAX_CREDENTIAL_COUNT_IN_LIST] = { 0 };
-    Credential creds[MAX_CREDENTIAL_COUNT_IN_LIST] = { 0 };
+    /* Request-owned arrays live outside the worker stack; the card arbiter serializes access. */
+    static PublicKeyCredentialDescriptor allowList[MAX_CREDENTIAL_COUNT_IN_LIST];
+    static Credential creds[MAX_CREDENTIAL_COUNT_IN_LIST];
+    memset(allowList, 0, sizeof(allowList));
+    memset(creds, 0, sizeof(creds));
     size_t allowList_len = 0, creds_len = 0;
-    uint8_t *aut_data = NULL;
-    bool asserted = false, up = false, uv = false;
+    /* The global card arbiter serializes CBOR workers, so this scratch has one owner. */
+    static uint8_t aut_data[MAX_MSG_SIZE];
+    mbedtls_platform_zeroize(aut_data, sizeof(aut_data));
+    bool up = false, uv = false;
     int64_t kty = 2, alg = 0, crv = 0;
     CborByteString kax = { 0 }, kay = { 0 }, salt_enc = { 0 }, salt_auth = { 0 };
     const bool *credBlob = NULL;
@@ -204,6 +206,9 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
 
     if (rpId.present == false || clientDataHash.present == false) {
         CBOR_ERROR(CTAP2_ERR_MISSING_PARAMETER);
+    }
+    if (clientDataHash.len != 32) {
+        CBOR_ERROR(CTAP1_ERR_INVALID_LEN);
     }
 
     uint8_t flags = 0;
@@ -373,7 +378,8 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
                     }
                     else {
                         if (numberOfCredentials != i) {
-                            creds[numberOfCredentials++] = creds[i];
+                            credential_move(&creds[numberOfCredentials], &creds[i]);
+                            numberOfCredentials++;
                         }
                         else {
                             numberOfCredentials++;
@@ -382,7 +388,8 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
                 }
                 else {
                     if (numberOfCredentials != i) {
-                        creds[numberOfCredentials++] = creds[i];
+                        credential_move(&creds[numberOfCredentials], &creds[i]);
+                        numberOfCredentials++;
                     }
                     else {
                         numberOfCredentials++;
@@ -471,16 +478,18 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
                 numberOfCredentials = 1;
             }
             if (numberOfCredentials > 1) {
-                asserted = true;
                 residentx = resident;
                 for (int i = 0; i < MAX_CREDENTIAL_COUNT_IN_LIST; i++) {
                     credential_free(&credsx[i]);
                 }
                 for (int i = 0; i < numberOfCredentials; i++) {
-                    credsx[i] = creds[i];
+                    credential_move(&credsx[i], &creds[i]);
                 }
+                selcred = &credsx[0];
                 numberOfCredentialsx = numberOfCredentials;
-                datax = (uint8_t *) calloc(1, len);
+                if (len > sizeof(datax)) {
+                    CBOR_ERROR(CTAP2_ERR_LIMIT_EXCEEDED);
+                }
                 memcpy(datax, data, len);
                 lenx = len;
                 flagsx = flags;
@@ -607,7 +616,9 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
     uint32_t ctr = get_sign_counter();
 
     size_t aut_data_len = 32 + 1 + 4 + ext_len;
-    aut_data = (uint8_t *) calloc(1, aut_data_len + clientDataHash.len);
+    if (aut_data_len + clientDataHash.len > sizeof(aut_data)) {
+        CBOR_ERROR(CTAP2_ERR_LIMIT_EXCEEDED);
+    }
     uint8_t *pa = aut_data;
     memcpy(pa, rp_id_hash, 32); pa += 32;
     *pa++ = flags;
@@ -741,6 +752,7 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
     file_put_data(ef_counter, (uint8_t *) &ctr, sizeof(ctr));
     low_flash_available();
 err:
+    mbedtls_platform_zeroize(aut_data, sizeof(aut_data));
     CBOR_FREE_BYTE_STRING(clientDataHash);
     CBOR_FREE_BYTE_STRING(pinUvAuthParam);
     CBOR_FREE_BYTE_STRING(rpId);
@@ -748,10 +760,8 @@ err:
     CBOR_FREE_BYTE_STRING(kay);
     CBOR_FREE_BYTE_STRING(salt_enc);
     CBOR_FREE_BYTE_STRING(salt_auth);
-    if (asserted == false) {
-        for (int i = 0; i < MAX_CREDENTIAL_COUNT_IN_LIST; i++) {
-            credential_free(&creds[i]);
-        }
+    for (int i = 0; i < MAX_CREDENTIAL_COUNT_IN_LIST; i++) {
+        credential_free(&creds[i]);
     }
 
     for (size_t m = 0; m < MAX_CREDENTIAL_COUNT_IN_LIST; m++) {
@@ -761,9 +771,8 @@ err:
             CBOR_FREE_BYTE_STRING(allowList[m].transports[n]);
         }
     }
-    if (aut_data) {
-        free(aut_data);
-    }
+    memset(allowList, 0, sizeof(allowList));
+    memset(creds, 0, sizeof(creds));
     if (error != CborNoError) {
         if (error == CborErrorImproperValue) {
             return CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
