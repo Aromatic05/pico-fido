@@ -603,11 +603,13 @@ static int cmd_put(void) {
     const uint8_t *key_enc = NULL;
     const uint8_t *key_mac = NULL;
     const uint8_t *private_key = NULL;
+    uint16_t private_key_len = 0;
     uint8_t label_len = 0;
     uint8_t algorithm = 0;
     uint8_t touch = 0;
     bool have_algorithm = false;
     bool have_touch = false;
+    bool have_private_key = false;
 
     uint16_t offset = 0;
     hsmauth_tlv_t tlv;
@@ -648,8 +650,11 @@ static int cmd_put(void) {
             have_touch = true;
             break;
         case HSMAUTH_TAG_PRIVATE_KEY:
-            if (private_key != NULL || tlv.len != HSMAUTH_P256_PRIVATE_LEN) return SW_WRONG_DATA();
+            if (have_private_key ||
+                (tlv.len != 0 && tlv.len != HSMAUTH_P256_PRIVATE_LEN)) return SW_WRONG_DATA();
             private_key = tlv.data;
+            private_key_len = tlv.len;
+            have_private_key = true;
             break;
         default:
             return SW_WRONG_DATA();
@@ -661,19 +666,21 @@ static int cmd_put(void) {
         return SW_WRONG_DATA();
     }
     if (algorithm == HSMAUTH_ALG_AES128) {
-        if (key_enc == NULL || key_mac == NULL || private_key != NULL) {
+        if (key_enc == NULL || key_mac == NULL || have_private_key) {
             return SW_WRONG_DATA();
         }
     }
     else if (algorithm == HSMAUTH_ALG_EC_P256) {
-        if (private_key == NULL || key_enc != NULL || key_mac != NULL) {
+        if (!have_private_key || key_enc != NULL || key_mac != NULL) {
             return SW_WRONG_DATA();
         }
-        uint8_t public_key[HSMAUTH_P256_PUBLIC_LEN];
-        int key_ret = p256_private_to_public(private_key, public_key);
-        mbedtls_platform_zeroize(public_key, sizeof(public_key));
-        if (key_ret != 0) {
-            return SW_WRONG_DATA();
+        if (private_key_len == HSMAUTH_P256_PRIVATE_LEN) {
+            uint8_t public_key[HSMAUTH_P256_PUBLIC_LEN];
+            int key_ret = p256_private_to_public(private_key, public_key);
+            mbedtls_platform_zeroize(public_key, sizeof(public_key));
+            if (key_ret != 0) {
+                return SW_WRONG_DATA();
+            }
         }
     }
     else {
@@ -709,7 +716,20 @@ static int cmd_put(void) {
         memcpy(cred.key_mac, key_mac, HSMAUTH_KEY_LEN);
     }
     else {
+        uint8_t generated_private[HSMAUTH_P256_PRIVATE_LEN] = {0};
+        if (private_key_len == 0) {
+            uint8_t public_key[HSMAUTH_P256_PUBLIC_LEN];
+            int key_ret = p256_generate_keypair(generated_private, public_key);
+            mbedtls_platform_zeroize(public_key, sizeof(public_key));
+            if (key_ret != 0) {
+                mbedtls_platform_zeroize(&cred, sizeof(cred));
+                mbedtls_platform_zeroize(generated_private, sizeof(generated_private));
+                return SW_EXEC_ERROR();
+            }
+            private_key = generated_private;
+        }
         memcpy(cred.private_key, private_key, HSMAUTH_P256_PRIVATE_LEN);
+        mbedtls_platform_zeroize(generated_private, sizeof(generated_private));
     }
     int ret = store_credential(slot, &cred);
     mbedtls_platform_zeroize(&cred, sizeof(cred));
