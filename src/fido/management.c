@@ -64,11 +64,6 @@ int man_unload() {
     return PICOKEY_OK;
 }
 
-#define CONFIG_LOCK_LEN 16
-#define MAN_SW_WRONG_DATA 0x6700
-#define MAN_SW_SECURITY_STATUS_NOT_SATISFIED 0x6982
-#define MAN_SW_OK 0x9000
-
 static const uint8_t _openpgp_aid[] = {
     6,
     0xD2, 0x76, 0x00, 0x01, 0x24, 0x01,
@@ -88,7 +83,7 @@ typedef struct {
     bool device_flags_set;
     uint8_t device_flags;
     bool config_lock_set;
-    uint8_t config_lock[CONFIG_LOCK_LEN];
+    uint8_t config_lock[MAN_CONFIG_LOCK_LEN];
 } man_config_t;
 
 static int man_tlv_next(const uint8_t *buf, uint16_t len, uint16_t *offset,
@@ -159,14 +154,14 @@ static int man_load_config(man_config_t *cfg) {
                 cfg->device_flags = data[0];
                 break;
             case TAG_CONFIG_LOCK:
-                if (tag_len != CONFIG_LOCK_LEN) return -1;
+                if (tag_len != MAN_CONFIG_LOCK_LEN) return -1;
                 if (!all_zero(data, tag_len)) {
                     cfg->config_lock_set = true;
-                    memcpy(cfg->config_lock, data, CONFIG_LOCK_LEN);
+                    memcpy(cfg->config_lock, data, MAN_CONFIG_LOCK_LEN);
                 }
                 break;
             case TAG_UNLOCK:
-                if (tag_len != CONFIG_LOCK_LEN) return -1;
+                if (tag_len != MAN_CONFIG_LOCK_LEN) return -1;
                 break;
             case TAG_REBOOT:
                 if (tag_len != 0) return -1;
@@ -212,7 +207,7 @@ static int man_store_config(const man_config_t *cfg) {
     }
     if (cfg->config_lock_set) {
         offset = man_append_tlv(out, offset, TAG_CONFIG_LOCK,
-                                cfg->config_lock, CONFIG_LOCK_LEN);
+                                cfg->config_lock, MAN_CONFIG_LOCK_LEN);
     }
 
     file_t *ef = file_new(EF_DEV_CONF);
@@ -242,6 +237,20 @@ int man_get_usb_config(uint16_t *enabled, bool *configured) {
     }
     *configured = cfg.usb_enabled_set;
     *enabled = cfg.usb_enabled_set ? cfg.usb_enabled : man_supported_caps();
+    return 0;
+}
+
+int man_get_capability_state(uint16_t *supported, uint16_t *enabled,
+                             bool *configured, bool *locked) {
+    man_config_t cfg;
+    if (supported == NULL || enabled == NULL || configured == NULL || locked == NULL ||
+        man_load_config(&cfg) != 0) {
+        return -1;
+    }
+    *supported = man_supported_caps();
+    *configured = cfg.usb_enabled_set;
+    *enabled = cfg.usb_enabled_set ? cfg.usb_enabled : *supported;
+    *locked = cfg.config_lock_set;
     return 0;
 }
 
@@ -342,10 +351,10 @@ uint16_t man_write_config(const uint8_t *request, uint16_t request_len) {
         }
         switch (tag) {
             case TAG_UNLOCK:
-                if (tag_len != CONFIG_LOCK_LEN) return MAN_SW_WRONG_DATA;
+                if (tag_len != MAN_CONFIG_LOCK_LEN) return MAN_SW_WRONG_DATA;
                 unlock_seen = true;
                 unlock_valid = cfg.config_lock_set &&
-                    mbedtls_ct_memcmp(cfg.config_lock, data, CONFIG_LOCK_LEN) == 0;
+                    mbedtls_ct_memcmp(cfg.config_lock, data, MAN_CONFIG_LOCK_LEN) == 0;
                 break;
             case TAG_USB_ENABLED: {
                 if (tag_len != 2) return MAN_SW_WRONG_DATA;
@@ -382,14 +391,14 @@ uint16_t man_write_config(const uint8_t *request, uint16_t request_len) {
                 changed = true;
                 break;
             case TAG_CONFIG_LOCK:
-                if (tag_len != CONFIG_LOCK_LEN) return MAN_SW_WRONG_DATA;
+                if (tag_len != MAN_CONFIG_LOCK_LEN) return MAN_SW_WRONG_DATA;
                 if (all_zero(data, tag_len)) {
                     next.config_lock_set = false;
                     memset(next.config_lock, 0, sizeof(next.config_lock));
                 }
                 else {
                     next.config_lock_set = true;
-                    memcpy(next.config_lock, data, CONFIG_LOCK_LEN);
+                    memcpy(next.config_lock, data, MAN_CONFIG_LOCK_LEN);
                 }
                 changed = true;
                 break;

@@ -51,8 +51,15 @@
 
 #define FLAG_REMOTE_WAKEUP 0x40
 #define FLAG_EJECT 0x80
+#define MAN_CONFIG_LOCK_LEN 16
+
+#define MAN_SW_WRONG_DATA 0x6700
+#define MAN_SW_SECURITY_STATUS_NOT_SATISFIED 0x6982
+#define MAN_SW_OK 0x9000
 
 extern int man_get_usb_config(uint16_t *enabled, bool *configured);
+extern int man_get_capability_state(uint16_t *supported, uint16_t *enabled,
+                                    bool *configured, bool *locked);
 extern int man_get_enabled_caps(uint16_t *enabled);
 extern bool cap_supported(uint16_t cap);
 extern int man_get_config();
