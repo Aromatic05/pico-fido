@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "apdu.h"
+#include "fido.h"
 #include "file.h"
 #include "management.h"
 #include "pico_keys.h"
@@ -1048,6 +1049,9 @@ static int cmd_calculate(void) {
 static int cmd_reset(void) {
     if (P1(apdu) != 0xDE || P2(apdu) != 0xAD || apdu.nc != 0) {
         return SW_INCORRECT_P1P2();
+    }
+    if (wait_button_pressed()) {
+        return SW_CONDITIONS_NOT_SATISFIED();
     }
     file_t *cfg = search_dynamic_file(HSMAUTH_CONFIG_FID);
     if (cfg != NULL && delete_file(cfg) != PICOKEY_OK) {

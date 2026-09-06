@@ -94,6 +94,9 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
         else if (val_u == 0x04) { // pubKeyCredParams
             CBOR_PARSE_ARRAY_START(_f1, 2)
             {
+                if (pubKeyCredParams_len >= MAX_CREDENTIAL_COUNT_IN_LIST) {
+                    CBOR_ERROR(CTAP2_ERR_LIMIT_EXCEEDED);
+                }
                 PublicKeyCredentialParameters *pk = &pubKeyCredParams[pubKeyCredParams_len];
                 CBOR_PARSE_MAP_START(_f2, 3)
                 {
@@ -109,6 +112,9 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
         else if (val_u == 0x05) { // excludeList
             CBOR_PARSE_ARRAY_START(_f1, 2)
             {
+                if (excludeList_len >= MAX_CREDENTIAL_COUNT_IN_LIST) {
+                    CBOR_ERROR(CTAP2_ERR_LIMIT_EXCEEDED);
+                }
                 PublicKeyCredentialDescriptor *pc = &excludeList[excludeList_len];
                 CBOR_PARSE_MAP_START(_f2, 3)
                 {
@@ -118,6 +124,9 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
                     if (strcmp(_fd3, "transports") == 0) {
                         CBOR_PARSE_ARRAY_START(_f3, 4)
                         {
+                            if (pc->transports_len >= MAX_CREDENTIAL_TRANSPORTS) {
+                                CBOR_ERROR(CTAP2_ERR_LIMIT_EXCEEDED);
+                            }
                             CBOR_FIELD_GET_TEXT(pc->transports[pc->transports_len], 4);
                             pc->transports_len++;
                         }
@@ -330,10 +339,15 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
         if (enterpriseAttestation != 1 && enterpriseAttestation != 2) { //9.2.1
             CBOR_ERROR(CTAP2_ERR_INVALID_OPTION);
         }
-        //Unfinished. See 6.1.2.9
+        /* EA mode 2 requires an RP allowlist. Until one is provisioned,
+         * reject the request rather than identifying this device to any RP. */
+        if (enterpriseAttestation == 2) {
+            CBOR_ERROR(CTAP2_ERR_NOT_ALLOWED);
+        }
     }
     if (pinUvAuthParam.present == true) { //11.1
-        int ret = verify((uint8_t)pinUvAuthProtocol, paut.data, clientDataHash.data, (uint16_t)clientDataHash.len, pinUvAuthParam.data);
+        int ret = verify((uint8_t)pinUvAuthProtocol, paut.data, clientDataHash.data, clientDataHash.len,
+                         pinUvAuthParam.data, pinUvAuthParam.len);
         if (ret != CborNoError) {
             CBOR_ERROR(CTAP2_ERR_PIN_AUTH_INVALID);
         }
@@ -360,8 +374,14 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
         if (strcmp(excludeList[e].type.data, (char *)"public-key") != 0) {
             continue;
         }
+        if (excludeList[e].id.len > MAX_CRED_ID_LENGTH) {
+            CBOR_ERROR(CTAP1_ERR_INVALID_LEN);
+        }
         Credential ecred = {0};
         if (credential_is_resident(excludeList[e].id.data, excludeList[e].id.len)) {
+            if (excludeList[e].id.len != CRED_RESIDENT_LEN) {
+                CBOR_ERROR(CTAP1_ERR_INVALID_LEN);
+            }
             for (int i = 0; i < MAX_RESIDENT_CREDENTIALS; i++) {
                 file_t *ef_cred = search_dynamic_file((uint16_t)(EF_CRED + i));
                 if (!file_has_data(ef_cred) || memcmp(file_get_data(ef_cred), rp_id_hash, 32) != 0) {
@@ -397,6 +417,13 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
     if (options.up == ptrue || options.up == NULL) { //14.1
         if (pinUvAuthParam.present == true) {
             if (getUserPresentFlagValue() == false) {
+                if (check_user_presence() == false) {
+                    CBOR_ERROR(CTAP2_ERR_OPERATION_DENIED);
+                }
+            }
+        }
+        else {
+            if (!(flags & FIDO2_AUT_FLAG_UP)) {
                 if (check_user_presence() == false) {
                     CBOR_ERROR(CTAP2_ERR_OPERATION_DENIED);
                 }
@@ -497,12 +524,14 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
                     mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
                     CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
                 }
-                if (verify((uint8_t)hmacSecretPinUvAuthProtocol, sharedSecret, salt_enc.data, (uint16_t)salt_enc.len, salt_auth.data) != 0) {
+                if (verify((uint8_t)hmacSecretPinUvAuthProtocol, sharedSecret, salt_enc.data, salt_enc.len,
+                           salt_auth.data, salt_auth.len) != 0) {
                     mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
                     CBOR_ERROR(CTAP2_ERR_EXTENSION_FIRST);
                 }
                 uint8_t salt_dec[64] = {0}, poff = ((uint8_t)hmacSecretPinUvAuthProtocol - 1) * IV_SIZE;
-                ret = decrypt((uint8_t)hmacSecretPinUvAuthProtocol, sharedSecret, salt_enc.data, (uint16_t)salt_enc.len, salt_dec);
+                ret = decrypt((uint8_t)hmacSecretPinUvAuthProtocol, sharedSecret, salt_enc.data, salt_enc.len,
+                              salt_dec, sizeof(salt_dec));
                 if (ret != 0) {
                     mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
                     CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
