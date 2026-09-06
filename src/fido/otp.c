@@ -209,6 +209,9 @@ uint16_t calculate_crc(const uint8_t *data, size_t data_len) {
 
 static uint8_t session_counter[2] = { 0 };
 int otp_button_pressed(uint8_t slot) {
+    if (slot == 0 || slot > (EF_OTP_SLOT4 - EF_OTP_SLOT1 + 1)) {
+        return 3;
+    }
     init_otp();
     if (!cap_supported(CAP_OTP)) {
         return 3;
