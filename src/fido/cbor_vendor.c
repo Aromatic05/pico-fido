@@ -31,6 +31,10 @@
 extern uint8_t keydev_dec[32];
 extern bool has_keydev_dec;
 
+__attribute__((weak)) int picokey_vendor_maintenance_start(void) {
+    return CTAP2_ERR_UNSUPPORTED_OPTION;
+}
+
 mse_t mse = { .init = false };
 
 int mse_decrypt_ct(uint8_t *data, size_t len) {
@@ -277,6 +281,18 @@ int cbor_vendor_generic(uint8_t cmd, const uint8_t *data, size_t len) {
         else {
             CBOR_ERROR(CTAP2_ERR_UNSUPPORTED_OPTION);
         }
+    }
+    else if (cmd == CTAP_VENDOR_MAINTENANCE) {
+        if (vendorCmd != 0x01) {
+            CBOR_ERROR(CTAP2_ERR_UNSUPPORTED_OPTION);
+        }
+        int maintenance_result = picokey_vendor_maintenance_start();
+        if (maintenance_result != CTAP2_OK) {
+            CBOR_ERROR(maintenance_result);
+        }
+        CBOR_CHECK(cbor_encoder_create_map(&encoder, &mapEncoder, 1));
+        CBOR_CHECK(cbor_encode_uint(&mapEncoder, 0x01));
+        CBOR_CHECK(cbor_encode_boolean(&mapEncoder, true));
     }
     else {
         CBOR_ERROR(CTAP2_ERR_UNSUPPORTED_OPTION);
