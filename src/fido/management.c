@@ -72,6 +72,10 @@ static const uint8_t _piv_aid[] = {
     5,
     0xA0, 0x00, 0x00, 0x03, 0x08,
 };
+static const uint8_t _hsmauth_aid[] = {
+    8,
+    0xA0, 0x00, 0x00, 0x05, 0x27, 0x21, 0x07, 0x01,
+};
 
 typedef struct {
     bool usb_enabled_set;
@@ -226,6 +230,9 @@ static uint16_t man_supported_caps(void) {
     }
     if (app_exists(_piv_aid + 1, _piv_aid[0])) {
         caps |= CAP_PIV;
+    }
+    if (app_exists(_hsmauth_aid + 1, _hsmauth_aid[0])) {
+        caps |= CAP_HSMAUTH;
     }
     return caps;
 }
