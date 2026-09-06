@@ -585,11 +585,13 @@ int cbor_client_pin(const uint8_t *data, size_t len) {
         mbedtls_platform_zeroize(pin_data, sizeof(pin_data));
         mbedtls_platform_zeroize(dhash, sizeof(dhash));
         if (file_has_data(ef_minpin) && file_get_data(ef_minpin)[1] == 1) {
-            uint8_t *tmpf = (uint8_t *) calloc(1, file_get_size(ef_minpin));
+            uint8_t tmpf[2 + MAX_MINPIN_RPIDS * 32];
+            if (file_get_size(ef_minpin) > sizeof(tmpf)) {
+                CBOR_ERROR(CTAP2_ERR_PROCESSING);
+            }
             memcpy(tmpf, file_get_data(ef_minpin), file_get_size(ef_minpin));
             tmpf[1] = 0;
             file_put_data(ef_minpin, tmpf, file_get_size(ef_minpin));
-            free(tmpf);
         }
         low_flash_available();
         resetPinUvAuthToken();

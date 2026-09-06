@@ -440,7 +440,10 @@ int cmd_calculate() {
         uint64_t v = get_uint64_t_be(chal.data);
         size_t ef_size = file_get_size(ef);
         v++;
-        uint8_t *tmp = (uint8_t *) calloc(1, ef_size);
+        uint8_t tmp[PICO_KEYS_FLASH_SECTOR_SIZE];
+        if (ef_size > sizeof(tmp)) {
+            return SW_EXEC_ERROR();
+        }
         memcpy(tmp, file_get_data(ef), ef_size);
         asn1_ctx_t ctxt;
         asn1_ctx_init(tmp, (uint16_t)ef_size, &ctxt);
@@ -448,7 +451,6 @@ int cmd_calculate() {
         put_uint64_t_be(v, chal.data);
         file_put_data(ef, tmp, (uint16_t)ef_size);
         low_flash_available();
-        free(tmp);
     }
     apdu.ne = res_APDU_size;
     return SW_OK();
@@ -657,14 +659,17 @@ int cmd_rename() {
     if (asn1_find_tag(&ctxi, TAG_NAME, &name) == false) {
         return SW_WRONG_DATA();
     }
-    uint8_t *new_data = (uint8_t *) calloc(fsize + new_name.len - name.len, sizeof(uint8_t));
+    size_t new_size = (size_t)fsize - name.len + new_name.len;
+    if (new_size > PICO_KEYS_FLASH_SECTOR_SIZE) {
+        return SW_FILE_FULL();
+    }
+    uint8_t new_data[PICO_KEYS_FLASH_SECTOR_SIZE] = {0};
     memcpy(new_data, fdata, name.data - fdata);
     *(new_data + (name.data - fdata) - 1) = new_name.len;
     memcpy(new_data + (name.data - fdata), new_name.data, new_name.len);
     memcpy(new_data + (name.data - fdata) + new_name.len, name.data + name.len, fsize - (name.data + name.len - fdata));
-    file_put_data(ef, new_data, fsize + new_name.len - name.len);
+    file_put_data(ef, new_data, (uint16_t)new_size);
     low_flash_available();
-    free(new_data);
     return SW_OK();
 }
 
