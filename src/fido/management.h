@@ -64,5 +64,6 @@ extern int man_get_enabled_caps(uint16_t *enabled);
 extern bool cap_supported(uint16_t cap);
 extern int man_get_config();
 extern uint16_t man_write_config(const uint8_t *request, uint16_t request_len);
+extern uint16_t man_write_config_maintenance(const uint8_t *request, uint16_t request_len);
 
 #endif //_MANAGEMENT_H
