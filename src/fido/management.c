@@ -332,7 +332,8 @@ int cmd_read_config() {
     return SW_OK();
 }
 
-uint16_t man_write_config(const uint8_t *request, uint16_t request_len) {
+static uint16_t man_write_config_impl(const uint8_t *request, uint16_t request_len,
+                                      bool maintenance_authorized) {
     if (request_len < 1 || request[0] != request_len - 1) {
         return MAN_SW_WRONG_DATA;
     }
@@ -417,11 +418,13 @@ uint16_t man_write_config(const uint8_t *request, uint16_t request_len) {
         }
     }
 
-    if (cfg.config_lock_set && (!unlock_seen || !unlock_valid)) {
-        return MAN_SW_SECURITY_STATUS_NOT_SATISFIED;
-    }
-    if (!cfg.config_lock_set && unlock_seen) {
-        return MAN_SW_SECURITY_STATUS_NOT_SATISFIED;
+    if (!maintenance_authorized) {
+        if (cfg.config_lock_set && (!unlock_seen || !unlock_valid)) {
+            return MAN_SW_SECURITY_STATUS_NOT_SATISFIED;
+        }
+        if (!cfg.config_lock_set && unlock_seen) {
+            return MAN_SW_SECURITY_STATUS_NOT_SATISFIED;
+        }
     }
 
     if (changed) {
@@ -431,6 +434,14 @@ uint16_t man_write_config(const uint8_t *request, uint16_t request_len) {
         }
     }
     return MAN_SW_OK;
+}
+
+uint16_t man_write_config(const uint8_t *request, uint16_t request_len) {
+    return man_write_config_impl(request, request_len, false);
+}
+
+uint16_t man_write_config_maintenance(const uint8_t *request, uint16_t request_len) {
+    return man_write_config_impl(request, request_len, true);
 }
 
 extern int cbor_reset();
