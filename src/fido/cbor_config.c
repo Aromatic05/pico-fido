@@ -208,7 +208,7 @@ int cbor_config(const uint8_t *data, size_t len) {
             phy_data.led_brightness_present = true;
         }
         else if (vendorCommandId == CTAP_CONFIG_PHY_OPTS) {
-            phy_data.opts = (uint16_t)vendorParamInt;
+            __atomic_store_n(&phy_data.opts, (uint16_t)vendorParamInt, __ATOMIC_RELEASE);
         }
 #endif
         else if (vendorCommandId == CTAP_CONFIG_EA_UPLOAD) {

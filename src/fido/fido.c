@@ -66,10 +66,10 @@ const uint8_t atr_fido[] = {
 };
 
 uint8_t fido_get_version_major() {
-    return PICO_FIDO_VERSION_MAJOR;
+    return PICO_FIDO_DEVICE_VERSION_MAJOR;
 }
 uint8_t fido_get_version_minor() {
-    return PICO_FIDO_VERSION_MINOR;
+    return PICO_FIDO_DEVICE_VERSION_MINOR;
 }
 
 int fido_select(app_t *a, uint8_t force) {

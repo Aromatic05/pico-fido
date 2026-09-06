@@ -33,12 +33,16 @@ const uint8_t man_aid[] = {
     8,
     0xa0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17
 };
+static const uint8_t yubikey_man_aid[] = {
+    7,
+    0xd2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01
+};
 extern void scan_all();
 extern void init_otp();
 int man_select(app_t *a, uint8_t force) {
     a->process_apdu = man_process_apdu;
     a->unload = man_unload;
-    sprintf((char *) res_APDU, "%d.%d.0", PICO_FIDO_VERSION_MAJOR, PICO_FIDO_VERSION_MINOR);
+    sprintf((char *) res_APDU, "%d.%d.0", PICO_FIDO_DEVICE_VERSION_MAJOR, PICO_FIDO_DEVICE_VERSION_MINOR);
     res_APDU_size = (uint16_t)strlen((char *) res_APDU);
     apdu.ne = res_APDU_size;
     if (force) {
@@ -53,6 +57,7 @@ int man_select(app_t *a, uint8_t force) {
 
 INITIALIZER ( man_ctor ) {
     register_app(man_select, man_aid);
+    register_app(man_select, yubikey_man_aid);
 }
 
 int man_unload() {
@@ -277,8 +282,8 @@ int man_get_config() {
     res_APDU[res_APDU_size++] = 0x01;
     res_APDU[res_APDU_size++] = TAG_VERSION;
     res_APDU[res_APDU_size++] = 3;
-    res_APDU[res_APDU_size++] = PICO_FIDO_VERSION_MAJOR;
-    res_APDU[res_APDU_size++] = PICO_FIDO_VERSION_MINOR;
+    res_APDU[res_APDU_size++] = PICO_FIDO_DEVICE_VERSION_MAJOR;
+    res_APDU[res_APDU_size++] = PICO_FIDO_DEVICE_VERSION_MINOR;
     res_APDU[res_APDU_size++] = 0;
 
     put_uint16_t_be(enabled, tmp);
