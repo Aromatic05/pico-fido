@@ -20,7 +20,10 @@
 #include "mbedtls/cipher.h"
 #include "mbedtls/cmac.h"
 #include "mbedtls/constant_time.h"
+#include "mbedtls/ecdh.h"
+#include "mbedtls/ecp.h"
 #include "mbedtls/platform_util.h"
+#include "mbedtls/sha256.h"
 
 #define HSMAUTH_TAG_LABEL                 0x71
 #define HSMAUTH_TAG_LABEL_LIST            0x72
@@ -49,8 +52,12 @@
 #define HSMAUTH_INS_CHANGE_PASSWORD       0x0B
 
 #define HSMAUTH_ALG_AES128                0x26
+#define HSMAUTH_ALG_EC_P256               0x27
 #define HSMAUTH_KEY_LEN                   16
 #define HSMAUTH_PASSWORD_LEN              16
+#define HSMAUTH_P256_PRIVATE_LEN           32
+#define HSMAUTH_P256_PUBLIC_LEN            65
+#define HSMAUTH_P256_CONTEXT_LEN          130
 #define HSMAUTH_MAX_LABEL_LEN             64
 #define HSMAUTH_INITIAL_RETRIES            8
 
@@ -60,7 +67,8 @@
 
 #define HSMAUTH_CONFIG_MAGIC              0x484D5343u
 #define HSMAUTH_CREDENTIAL_MAGIC          0x484D5341u
-#define HSMAUTH_STORAGE_VERSION           1
+#define HSMAUTH_CONFIG_VERSION            1
+#define HSMAUTH_CREDENTIAL_VERSION        2
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -82,11 +90,56 @@ typedef struct __attribute__((packed)) {
     uint8_t credential_password[HSMAUTH_PASSWORD_LEN];
     uint8_t key_enc[HSMAUTH_KEY_LEN];
     uint8_t key_mac[HSMAUTH_KEY_LEN];
+} hsmauth_credential_v1_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint8_t version;
+    uint8_t algorithm;
+    uint8_t touch_required;
+    uint8_t retries;
+    uint8_t label_len;
+    uint8_t reserved[3];
+    uint8_t label[HSMAUTH_MAX_LABEL_LEN];
+    uint8_t credential_password[HSMAUTH_PASSWORD_LEN];
+    uint8_t key_enc[HSMAUTH_KEY_LEN];
+    uint8_t key_mac[HSMAUTH_KEY_LEN];
+    uint8_t private_key[HSMAUTH_P256_PRIVATE_LEN];
 } hsmauth_credential_t;
 
 typedef struct {
+    bool ephemeral_valid;
+    uint8_t label_len;
+    uint8_t label[HSMAUTH_MAX_LABEL_LEN];
+    uint8_t ephemeral_private[HSMAUTH_P256_PRIVATE_LEN];
+    uint8_t ephemeral_public[HSMAUTH_P256_PUBLIC_LEN];
+} hsmauth_session_state_t;
+
+static hsmauth_session_state_t hsmauth_sessions[APDU_SESSION_COUNT];
+
+static hsmauth_session_state_t *hsmauth_session(void) {
+    return &hsmauth_sessions[apdu_current_session()];
+}
+
+static void hsmauth_clear_session(hsmauth_session_state_t *session) {
+    if (session != NULL) {
+        mbedtls_platform_zeroize(session, sizeof(*session));
+    }
+}
+
+static void hsmauth_clear_label_sessions(const uint8_t *label, uint8_t label_len) {
+    for (size_t i = 0; i < APDU_SESSION_COUNT; ++i) {
+        hsmauth_session_state_t *session = &hsmauth_sessions[i];
+        if (session->ephemeral_valid && session->label_len == label_len &&
+            mbedtls_ct_memcmp(session->label, label, label_len) == 0) {
+            hsmauth_clear_session(session);
+        }
+    }
+}
+
+typedef struct {
     uint8_t tag;
-    uint8_t len;
+    uint16_t len;
     const uint8_t *data;
 } hsmauth_tlv_t;
 
@@ -105,14 +158,15 @@ static uint16_t set_sw(uint16_t sw) {
 
 static bool valid_config(const hsmauth_config_t *cfg) {
     return cfg != NULL && cfg->magic == HSMAUTH_CONFIG_MAGIC &&
-           cfg->version == HSMAUTH_STORAGE_VERSION &&
+           cfg->version == HSMAUTH_CONFIG_VERSION &&
            cfg->management_retries <= HSMAUTH_INITIAL_RETRIES;
 }
 
 static bool valid_credential(const hsmauth_credential_t *cred) {
     return cred != NULL && cred->magic == HSMAUTH_CREDENTIAL_MAGIC &&
-           cred->version == HSMAUTH_STORAGE_VERSION &&
-           cred->algorithm == HSMAUTH_ALG_AES128 &&
+           cred->version == HSMAUTH_CREDENTIAL_VERSION &&
+           (cred->algorithm == HSMAUTH_ALG_AES128 ||
+            cred->algorithm == HSMAUTH_ALG_EC_P256) &&
            cred->touch_required <= 1 &&
            cred->retries <= HSMAUTH_INITIAL_RETRIES &&
            cred->label_len >= 1 && cred->label_len <= HSMAUTH_MAX_LABEL_LEN;
@@ -124,7 +178,7 @@ static int load_config(hsmauth_config_t *cfg) {
     }
     memset(cfg, 0, sizeof(*cfg));
     cfg->magic = HSMAUTH_CONFIG_MAGIC;
-    cfg->version = HSMAUTH_STORAGE_VERSION;
+    cfg->version = HSMAUTH_CONFIG_VERSION;
     cfg->management_retries = HSMAUTH_INITIAL_RETRIES;
 
     file_t *ef = search_dynamic_file(HSMAUTH_CONFIG_FID);
@@ -162,10 +216,35 @@ static file_t *credential_file(unsigned slot) {
 
 static bool load_credential(unsigned slot, hsmauth_credential_t *cred) {
     file_t *ef = credential_file(slot);
-    if (!file_has_data(ef) || file_get_size(ef) != sizeof(*cred)) {
+    if (!file_has_data(ef)) {
         return false;
     }
-    memcpy(cred, file_get_data(ef), sizeof(*cred));
+    if (file_get_size(ef) == sizeof(*cred)) {
+        memcpy(cred, file_get_data(ef), sizeof(*cred));
+    }
+    else if (file_get_size(ef) == sizeof(hsmauth_credential_v1_t)) {
+        const hsmauth_credential_v1_t *old =
+            (const hsmauth_credential_v1_t *)file_get_data(ef);
+        if (old->magic != HSMAUTH_CREDENTIAL_MAGIC || old->version != 1 ||
+            old->algorithm != HSMAUTH_ALG_AES128) {
+            return false;
+        }
+        memset(cred, 0, sizeof(*cred));
+        cred->magic = old->magic;
+        cred->version = HSMAUTH_CREDENTIAL_VERSION;
+        cred->algorithm = old->algorithm;
+        cred->touch_required = old->touch_required;
+        cred->retries = old->retries;
+        cred->label_len = old->label_len;
+        memcpy(cred->label, old->label, sizeof(cred->label));
+        memcpy(cred->credential_password, old->credential_password,
+               sizeof(cred->credential_password));
+        memcpy(cred->key_enc, old->key_enc, sizeof(cred->key_enc));
+        memcpy(cred->key_mac, old->key_mac, sizeof(cred->key_mac));
+    }
+    else {
+        return false;
+    }
     return valid_credential(cred);
 }
 
@@ -232,8 +311,20 @@ static int tlv_next(const uint8_t *buf, uint16_t len, uint16_t *offset,
     }
     uint16_t p = *offset;
     tlv->tag = buf[p++];
-    tlv->len = buf[p++];
-    if ((tlv->len & 0x80u) != 0 || (uint16_t)(len - p) < tlv->len) {
+    uint8_t first_len = buf[p++];
+    if (first_len == 0x81) {
+        if (p >= len || buf[p] < 0x80) {
+            return -1;
+        }
+        tlv->len = buf[p++];
+    }
+    else if ((first_len & 0x80u) != 0) {
+        return -1;
+    }
+    else {
+        tlv->len = first_len;
+    }
+    if ((uint16_t)(len - p) < tlv->len) {
         return -1;
     }
     tlv->data = buf + p;
@@ -329,6 +420,142 @@ static int scp03_derive(const uint8_t key[HSMAUTH_KEY_LEN], uint8_t type,
     return ret;
 }
 
+static int p256_private_to_public(const uint8_t private_key[HSMAUTH_P256_PRIVATE_LEN],
+                                  uint8_t public_key[HSMAUTH_P256_PUBLIC_LEN]) {
+    mbedtls_ecp_group grp;
+    mbedtls_mpi d;
+    mbedtls_ecp_point q;
+    mbedtls_ecp_group_init(&grp);
+    mbedtls_mpi_init(&d);
+    mbedtls_ecp_point_init(&q);
+
+    int ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
+    if (ret == 0) {
+        ret = mbedtls_mpi_read_binary(&d, private_key, HSMAUTH_P256_PRIVATE_LEN);
+    }
+    if (ret == 0) {
+        ret = mbedtls_ecp_check_privkey(&grp, &d);
+    }
+    if (ret == 0) {
+        ret = mbedtls_ecp_mul(&grp, &q, &d, &grp.G, random_gen, NULL);
+    }
+    size_t olen = 0;
+    if (ret == 0) {
+        ret = mbedtls_ecp_point_write_binary(&grp, &q, MBEDTLS_ECP_PF_UNCOMPRESSED,
+                                             &olen, public_key,
+                                             HSMAUTH_P256_PUBLIC_LEN);
+    }
+    if (ret == 0 && olen != HSMAUTH_P256_PUBLIC_LEN) {
+        ret = -1;
+    }
+
+    mbedtls_ecp_point_free(&q);
+    mbedtls_mpi_free(&d);
+    mbedtls_ecp_group_free(&grp);
+    return ret;
+}
+
+static int p256_generate_keypair(uint8_t private_key[HSMAUTH_P256_PRIVATE_LEN],
+                                 uint8_t public_key[HSMAUTH_P256_PUBLIC_LEN]) {
+    mbedtls_ecp_keypair key;
+    mbedtls_ecp_keypair_init(&key);
+    int ret = mbedtls_ecp_gen_key(MBEDTLS_ECP_DP_SECP256R1, &key, random_gen, NULL);
+    if (ret == 0) {
+        ret = mbedtls_mpi_write_binary(&key.d, private_key,
+                                       HSMAUTH_P256_PRIVATE_LEN);
+    }
+    size_t olen = 0;
+    if (ret == 0) {
+        ret = mbedtls_ecp_point_write_binary(&key.grp, &key.Q,
+                                             MBEDTLS_ECP_PF_UNCOMPRESSED,
+                                             &olen, public_key,
+                                             HSMAUTH_P256_PUBLIC_LEN);
+    }
+    if (ret == 0 && olen != HSMAUTH_P256_PUBLIC_LEN) {
+        ret = -1;
+    }
+    mbedtls_ecp_keypair_free(&key);
+    return ret;
+}
+
+static int p256_ecdh(const uint8_t private_key[HSMAUTH_P256_PRIVATE_LEN],
+                     const uint8_t public_key[HSMAUTH_P256_PUBLIC_LEN],
+                     uint8_t shared_secret[HSMAUTH_P256_PRIVATE_LEN]) {
+    mbedtls_ecp_group grp;
+    mbedtls_mpi d;
+    mbedtls_mpi z;
+    mbedtls_ecp_point q;
+    mbedtls_ecp_group_init(&grp);
+    mbedtls_mpi_init(&d);
+    mbedtls_mpi_init(&z);
+    mbedtls_ecp_point_init(&q);
+
+    int ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
+    if (ret == 0) {
+        ret = mbedtls_mpi_read_binary(&d, private_key, HSMAUTH_P256_PRIVATE_LEN);
+    }
+    if (ret == 0) {
+        ret = mbedtls_ecp_check_privkey(&grp, &d);
+    }
+    if (ret == 0) {
+        ret = mbedtls_ecp_point_read_binary(&grp, &q, public_key,
+                                            HSMAUTH_P256_PUBLIC_LEN);
+    }
+    if (ret == 0) {
+        ret = mbedtls_ecp_check_pubkey(&grp, &q);
+    }
+    if (ret == 0) {
+        ret = mbedtls_ecdh_compute_shared(&grp, &z, &q, &d, random_gen, NULL);
+    }
+    if (ret == 0) {
+        ret = mbedtls_mpi_write_binary(&z, shared_secret,
+                                       HSMAUTH_P256_PRIVATE_LEN);
+    }
+
+    mbedtls_ecp_point_free(&q);
+    mbedtls_mpi_free(&z);
+    mbedtls_mpi_free(&d);
+    mbedtls_ecp_group_free(&grp);
+    return ret;
+}
+
+static int x963_sha256_derive64(const uint8_t shared_secret[64],
+                                uint8_t output[64]) {
+    static const uint8_t shared_info[] = {0x3C, 0x88, 0x10};
+    uint8_t input[64 + 4 + sizeof(shared_info)];
+    memcpy(input, shared_secret, 64);
+    memcpy(input + 68, shared_info, sizeof(shared_info));
+
+    for (uint32_t counter = 1; counter <= 2; ++counter) {
+        input[64] = (uint8_t)(counter >> 24);
+        input[65] = (uint8_t)(counter >> 16);
+        input[66] = (uint8_t)(counter >> 8);
+        input[67] = (uint8_t)counter;
+        int ret = mbedtls_sha256(input, sizeof(input), output + (counter - 1) * 32, 0);
+        if (ret != 0) {
+            mbedtls_platform_zeroize(input, sizeof(input));
+            return ret;
+        }
+    }
+    mbedtls_platform_zeroize(input, sizeof(input));
+    return 0;
+}
+
+static int receipt_cmac(const uint8_t key[HSMAUTH_KEY_LEN],
+                        const uint8_t epk_sd[HSMAUTH_P256_PUBLIC_LEN],
+                        const uint8_t epk_oce[HSMAUTH_P256_PUBLIC_LEN],
+                        uint8_t receipt[HSMAUTH_KEY_LEN]) {
+    uint8_t input[HSMAUTH_P256_CONTEXT_LEN];
+    memcpy(input, epk_sd, HSMAUTH_P256_PUBLIC_LEN);
+    memcpy(input + HSMAUTH_P256_PUBLIC_LEN, epk_oce, HSMAUTH_P256_PUBLIC_LEN);
+    const mbedtls_cipher_info_t *cipher =
+        mbedtls_cipher_info_from_type(MBEDTLS_CIPHER_AES_128_ECB);
+    int ret = cipher == NULL ? -1 :
+        mbedtls_cipher_cmac(cipher, key, 128, input, sizeof(input), receipt);
+    mbedtls_platform_zeroize(input, sizeof(input));
+    return ret;
+}
+
 static bool touch_timed_out(void) {
 #ifdef ENABLE_EMULATION
     return false;
@@ -339,13 +566,20 @@ static bool touch_timed_out(void) {
 
 int hsmauth_process_apdu(void);
 
+static int hsmauth_unload(void) {
+    hsmauth_clear_session(hsmauth_session());
+    return PICOKEY_OK;
+}
+
 static int hsmauth_select(app_t *app, uint8_t force) {
-    (void)force;
     if (!cap_supported(CAP_HSMAUTH)) {
         return PICOKEY_ERR_FILE_NOT_FOUND;
     }
+    if (force) {
+        hsmauth_clear_session(hsmauth_session());
+    }
     app->process_apdu = hsmauth_process_apdu;
-    app->unload = NULL;
+    app->unload = hsmauth_unload;
 
     const uint8_t version[3] = {
         PICO_FIDO_DEVICE_VERSION_MAJOR,
@@ -368,6 +602,7 @@ static int cmd_put(void) {
     const uint8_t *password = NULL;
     const uint8_t *key_enc = NULL;
     const uint8_t *key_mac = NULL;
+    const uint8_t *private_key = NULL;
     uint8_t label_len = 0;
     uint8_t algorithm = 0;
     uint8_t touch = 0;
@@ -412,14 +647,36 @@ static int cmd_put(void) {
             touch = tlv.data[0];
             have_touch = true;
             break;
+        case HSMAUTH_TAG_PRIVATE_KEY:
+            if (private_key != NULL || tlv.len != HSMAUTH_P256_PRIVATE_LEN) return SW_WRONG_DATA();
+            private_key = tlv.data;
+            break;
         default:
             return SW_WRONG_DATA();
         }
     }
 
     if (management_key == NULL || label == NULL || password == NULL ||
-        !have_algorithm || !have_touch || algorithm != HSMAUTH_ALG_AES128 ||
-        key_enc == NULL || key_mac == NULL) {
+        !have_algorithm || !have_touch) {
+        return SW_WRONG_DATA();
+    }
+    if (algorithm == HSMAUTH_ALG_AES128) {
+        if (key_enc == NULL || key_mac == NULL || private_key != NULL) {
+            return SW_WRONG_DATA();
+        }
+    }
+    else if (algorithm == HSMAUTH_ALG_EC_P256) {
+        if (private_key == NULL || key_enc != NULL || key_mac != NULL) {
+            return SW_WRONG_DATA();
+        }
+        uint8_t public_key[HSMAUTH_P256_PUBLIC_LEN];
+        int key_ret = p256_private_to_public(private_key, public_key);
+        mbedtls_platform_zeroize(public_key, sizeof(public_key));
+        if (key_ret != 0) {
+            return SW_WRONG_DATA();
+        }
+    }
+    else {
         return SW_WRONG_DATA();
     }
 
@@ -440,17 +697,25 @@ static int cmd_put(void) {
 
     hsmauth_credential_t cred = {0};
     cred.magic = HSMAUTH_CREDENTIAL_MAGIC;
-    cred.version = HSMAUTH_STORAGE_VERSION;
+    cred.version = HSMAUTH_CREDENTIAL_VERSION;
     cred.algorithm = algorithm;
     cred.touch_required = touch;
     cred.retries = HSMAUTH_INITIAL_RETRIES;
     cred.label_len = label_len;
     memcpy(cred.label, label, label_len);
     memcpy(cred.credential_password, password, HSMAUTH_PASSWORD_LEN);
-    memcpy(cred.key_enc, key_enc, HSMAUTH_KEY_LEN);
-    memcpy(cred.key_mac, key_mac, HSMAUTH_KEY_LEN);
+    if (algorithm == HSMAUTH_ALG_AES128) {
+        memcpy(cred.key_enc, key_enc, HSMAUTH_KEY_LEN);
+        memcpy(cred.key_mac, key_mac, HSMAUTH_KEY_LEN);
+    }
+    else {
+        memcpy(cred.private_key, private_key, HSMAUTH_P256_PRIVATE_LEN);
+    }
     int ret = store_credential(slot, &cred);
     mbedtls_platform_zeroize(&cred, sizeof(cred));
+    if (ret == PICOKEY_OK) {
+        hsmauth_clear_label_sessions(label, label_len);
+    }
     return ret == PICOKEY_OK ? SW_OK() : SW_EXEC_ERROR();
 }
 
@@ -499,7 +764,11 @@ static int cmd_delete(void) {
     if (find_credential(label, label_len, NULL, &slot) != PICOKEY_OK) {
         return SW_FILE_NOT_FOUND();
     }
-    return delete_file(credential_file(slot)) == PICOKEY_OK ? SW_OK() : SW_EXEC_ERROR();
+    int ret = delete_file(credential_file(slot));
+    if (ret == PICOKEY_OK) {
+        hsmauth_clear_label_sessions(label, label_len);
+    }
+    return ret == PICOKEY_OK ? SW_OK() : SW_EXEC_ERROR();
 }
 
 static int cmd_list(void) {
@@ -554,10 +823,33 @@ static int cmd_get_challenge(void) {
     if (find_credential(label, label_len, &cred, NULL) != PICOKEY_OK) {
         return SW_FILE_NOT_FOUND();
     }
+    if (cred.algorithm == HSMAUTH_ALG_AES128) {
+        hsmauth_clear_session(hsmauth_session());
+        random_gen(NULL, res_APDU, 8);
+        res_APDU_size = 8;
+        apdu.ne = 8;
+    }
+    else if (cred.algorithm == HSMAUTH_ALG_EC_P256) {
+        hsmauth_session_state_t *session = hsmauth_session();
+        hsmauth_clear_session(session);
+        if (p256_generate_keypair(session->ephemeral_private,
+                                  session->ephemeral_public) != 0) {
+            hsmauth_clear_session(session);
+            mbedtls_platform_zeroize(&cred, sizeof(cred));
+            return SW_EXEC_ERROR();
+        }
+        session->ephemeral_valid = true;
+        session->label_len = label_len;
+        memcpy(session->label, label, label_len);
+        memcpy(res_APDU, session->ephemeral_public, HSMAUTH_P256_PUBLIC_LEN);
+        res_APDU_size = HSMAUTH_P256_PUBLIC_LEN;
+        apdu.ne = HSMAUTH_P256_PUBLIC_LEN;
+    }
+    else {
+        mbedtls_platform_zeroize(&cred, sizeof(cred));
+        return SW_WRONG_DATA();
+    }
     mbedtls_platform_zeroize(&cred, sizeof(cred));
-    random_gen(NULL, res_APDU, 8);
-    res_APDU_size = 8;
-    apdu.ne = 8;
     return SW_OK();
 }
 
@@ -566,7 +858,10 @@ static int cmd_calculate(void) {
     const uint8_t *context = NULL;
     const uint8_t *password = NULL;
     const uint8_t *card_crypto = NULL;
+    const uint8_t *public_key = NULL;
     uint8_t label_len = 0;
+    uint8_t context_len = 0;
+    uint8_t card_crypto_len = 0;
     uint16_t offset = 0;
     hsmauth_tlv_t tlv;
 
@@ -581,16 +876,22 @@ static int cmd_calculate(void) {
             label_len = tlv.len;
             break;
         case HSMAUTH_TAG_CONTEXT:
-            if (context != NULL || tlv.len != 16) return SW_WRONG_DATA();
+            if (context != NULL || (tlv.len != 16 && tlv.len != HSMAUTH_P256_CONTEXT_LEN)) return SW_WRONG_DATA();
             context = tlv.data;
+            context_len = tlv.len;
             break;
         case HSMAUTH_TAG_CREDENTIAL_PASSWORD:
             if (password != NULL || tlv.len != HSMAUTH_PASSWORD_LEN) return SW_WRONG_DATA();
             password = tlv.data;
             break;
         case HSMAUTH_TAG_RESPONSE:
-            if (card_crypto != NULL || tlv.len != 8) return SW_WRONG_DATA();
+            if (card_crypto != NULL || (tlv.len != 8 && tlv.len != HSMAUTH_KEY_LEN)) return SW_WRONG_DATA();
             card_crypto = tlv.data;
+            card_crypto_len = tlv.len;
+            break;
+        case HSMAUTH_TAG_PUBLIC_KEY:
+            if (public_key != NULL || tlv.len != HSMAUTH_P256_PUBLIC_LEN) return SW_WRONG_DATA();
+            public_key = tlv.data;
             break;
         default:
             return SW_WRONG_DATA();
@@ -615,44 +916,107 @@ static int cmd_calculate(void) {
         return SW_SECURITY_STATUS_NOT_SATISFIED();
     }
 
-    uint8_t s_enc[16] = {0};
-    uint8_t s_mac[16] = {0};
-    uint8_t s_rmac[16] = {0};
-    if (scp03_derive(cred.key_enc, 0x04, 0x0080, context, 16, s_enc) != 0 ||
-        scp03_derive(cred.key_mac, 0x06, 0x0080, context, 16, s_mac) != 0 ||
-        scp03_derive(cred.key_mac, 0x07, 0x0080, context, 16, s_rmac) != 0) {
-        mbedtls_platform_zeroize(&cred, sizeof(cred));
-        mbedtls_platform_zeroize(s_enc, sizeof(s_enc));
-        mbedtls_platform_zeroize(s_mac, sizeof(s_mac));
-        mbedtls_platform_zeroize(s_rmac, sizeof(s_rmac));
-        return SW_EXEC_ERROR();
-    }
-
-    if (card_crypto != NULL) {
-        uint8_t expected[16] = {0};
-        if (scp03_derive(s_mac, 0x00, 0x0040, context, 16, expected) != 0 ||
-            mbedtls_ct_memcmp(expected, card_crypto, 8) != 0) {
-            mbedtls_platform_zeroize(expected, sizeof(expected));
+    if (cred.algorithm == HSMAUTH_ALG_AES128) {
+        if (context_len != 16 || public_key != NULL ||
+            (card_crypto != NULL && card_crypto_len != 8)) {
+            mbedtls_platform_zeroize(&cred, sizeof(cred));
+            return SW_WRONG_DATA();
+        }
+        uint8_t s_enc[16] = {0};
+        uint8_t s_mac[16] = {0};
+        uint8_t s_rmac[16] = {0};
+        if (scp03_derive(cred.key_enc, 0x04, 0x0080, context, 16, s_enc) != 0 ||
+            scp03_derive(cred.key_mac, 0x06, 0x0080, context, 16, s_mac) != 0 ||
+            scp03_derive(cred.key_mac, 0x07, 0x0080, context, 16, s_rmac) != 0) {
             mbedtls_platform_zeroize(&cred, sizeof(cred));
             mbedtls_platform_zeroize(s_enc, sizeof(s_enc));
             mbedtls_platform_zeroize(s_mac, sizeof(s_mac));
             mbedtls_platform_zeroize(s_rmac, sizeof(s_rmac));
-            return SW_SECURITY_STATUS_NOT_SATISFIED();
+            return SW_EXEC_ERROR();
         }
-        mbedtls_platform_zeroize(expected, sizeof(expected));
+        if (card_crypto != NULL) {
+            uint8_t expected[16] = {0};
+            if (scp03_derive(s_mac, 0x00, 0x0040, context, 16, expected) != 0 ||
+                mbedtls_ct_memcmp(expected, card_crypto, 8) != 0) {
+                mbedtls_platform_zeroize(expected, sizeof(expected));
+                mbedtls_platform_zeroize(&cred, sizeof(cred));
+                mbedtls_platform_zeroize(s_enc, sizeof(s_enc));
+                mbedtls_platform_zeroize(s_mac, sizeof(s_mac));
+                mbedtls_platform_zeroize(s_rmac, sizeof(s_rmac));
+                return SW_SECURITY_STATUS_NOT_SATISFIED();
+            }
+            mbedtls_platform_zeroize(expected, sizeof(expected));
+        }
+        memcpy(res_APDU, s_enc, 16);
+        memcpy(res_APDU + 16, s_mac, 16);
+        memcpy(res_APDU + 32, s_rmac, 16);
+        res_APDU_size = 48;
+        apdu.ne = 48;
+        mbedtls_platform_zeroize(&cred, sizeof(cred));
+        mbedtls_platform_zeroize(s_enc, sizeof(s_enc));
+        mbedtls_platform_zeroize(s_mac, sizeof(s_mac));
+        mbedtls_platform_zeroize(s_rmac, sizeof(s_rmac));
+        return SW_OK();
     }
 
-    memcpy(res_APDU, s_enc, 16);
-    memcpy(res_APDU + 16, s_mac, 16);
-    memcpy(res_APDU + 32, s_rmac, 16);
-    res_APDU_size = 48;
-    apdu.ne = 48;
+    if (cred.algorithm == HSMAUTH_ALG_EC_P256) {
+        hsmauth_session_state_t *session = hsmauth_session();
+        if (context_len != HSMAUTH_P256_CONTEXT_LEN ||
+            public_key == NULL || card_crypto == NULL ||
+            card_crypto_len != HSMAUTH_KEY_LEN ||
+            !session->ephemeral_valid || session->label_len != label_len ||
+            mbedtls_ct_memcmp(session->label, label, label_len) != 0 ||
+            mbedtls_ct_memcmp(session->ephemeral_public, context,
+                              HSMAUTH_P256_PUBLIC_LEN) != 0) {
+            mbedtls_platform_zeroize(&cred, sizeof(cred));
+            return SW_SECURITY_STATUS_NOT_SATISFIED();
+        }
+
+        const uint8_t *epk_sd = context + HSMAUTH_P256_PUBLIC_LEN;
+        uint8_t shared[64] = {0};
+        uint8_t keys[64] = {0};
+        uint8_t expected_receipt[HSMAUTH_KEY_LEN] = {0};
+        int ret = p256_ecdh(session->ephemeral_private, epk_sd, shared);
+        if (ret == 0) {
+            ret = p256_ecdh(cred.private_key, public_key,
+                            shared + HSMAUTH_P256_PRIVATE_LEN);
+        }
+        if (ret == 0) {
+            ret = x963_sha256_derive64(shared, keys);
+        }
+        if (ret == 0) {
+            ret = receipt_cmac(keys, epk_sd, session->ephemeral_public,
+                               expected_receipt);
+        }
+        if (ret != 0) {
+            mbedtls_platform_zeroize(&cred, sizeof(cred));
+            mbedtls_platform_zeroize(shared, sizeof(shared));
+            mbedtls_platform_zeroize(keys, sizeof(keys));
+            mbedtls_platform_zeroize(expected_receipt, sizeof(expected_receipt));
+            return SW_EXEC_ERROR();
+        }
+        if (mbedtls_ct_memcmp(expected_receipt, card_crypto,
+                              HSMAUTH_KEY_LEN) != 0) {
+            mbedtls_platform_zeroize(&cred, sizeof(cred));
+            mbedtls_platform_zeroize(shared, sizeof(shared));
+            mbedtls_platform_zeroize(keys, sizeof(keys));
+            mbedtls_platform_zeroize(expected_receipt, sizeof(expected_receipt));
+            return SW_SECURITY_STATUS_NOT_SATISFIED();
+        }
+
+        memcpy(res_APDU, keys + HSMAUTH_KEY_LEN, 48);
+        res_APDU_size = 48;
+        apdu.ne = 48;
+        hsmauth_clear_session(session);
+        mbedtls_platform_zeroize(&cred, sizeof(cred));
+        mbedtls_platform_zeroize(shared, sizeof(shared));
+        mbedtls_platform_zeroize(keys, sizeof(keys));
+        mbedtls_platform_zeroize(expected_receipt, sizeof(expected_receipt));
+        return SW_OK();
+    }
 
     mbedtls_platform_zeroize(&cred, sizeof(cred));
-    mbedtls_platform_zeroize(s_enc, sizeof(s_enc));
-    mbedtls_platform_zeroize(s_mac, sizeof(s_mac));
-    mbedtls_platform_zeroize(s_rmac, sizeof(s_rmac));
-    return SW_OK();
+    return SW_WRONG_DATA();
 }
 
 static int cmd_reset(void) {
@@ -668,6 +1032,9 @@ static int cmd_reset(void) {
         if (ef != NULL && delete_file(ef) != PICOKEY_OK) {
             return SW_EXEC_ERROR();
         }
+    }
+    for (size_t i = 0; i < APDU_SESSION_COUNT; ++i) {
+        hsmauth_clear_session(&hsmauth_sessions[i]);
     }
     return SW_OK();
 }
@@ -736,6 +1103,30 @@ static int cmd_get_management_retries(void) {
     return SW_OK();
 }
 
+static int cmd_get_public_key(void) {
+    const uint8_t *label;
+    uint8_t label_len;
+    if (parse_label_only(&label, &label_len) != 0) {
+        return SW_WRONG_DATA();
+    }
+    hsmauth_credential_t cred;
+    if (find_credential(label, label_len, &cred, NULL) != PICOKEY_OK) {
+        return SW_FILE_NOT_FOUND();
+    }
+    if (cred.algorithm != HSMAUTH_ALG_EC_P256) {
+        mbedtls_platform_zeroize(&cred, sizeof(cred));
+        return SW_WRONG_DATA();
+    }
+    int ret = p256_private_to_public(cred.private_key, res_APDU);
+    mbedtls_platform_zeroize(&cred, sizeof(cred));
+    if (ret != 0) {
+        return SW_EXEC_ERROR();
+    }
+    res_APDU_size = HSMAUTH_P256_PUBLIC_LEN;
+    apdu.ne = HSMAUTH_P256_PUBLIC_LEN;
+    return SW_OK();
+}
+
 static int cmd_not_supported(void) {
     return SW_INS_NOT_SUPPORTED();
 }
@@ -750,7 +1141,7 @@ static const cmd_t hsmauth_cmds[] = {
     { HSMAUTH_INS_GET_VERSION, cmd_get_version },
     { HSMAUTH_INS_PUT_MANAGEMENT_KEY, cmd_put_management_key },
     { HSMAUTH_INS_GET_MGMT_RETRIES, cmd_get_management_retries },
-    { HSMAUTH_INS_GET_PUBLIC_KEY, cmd_not_supported },
+    { HSMAUTH_INS_GET_PUBLIC_KEY, cmd_get_public_key },
     { HSMAUTH_INS_CHANGE_PASSWORD, cmd_not_supported },
     { 0x00, NULL },
 };
