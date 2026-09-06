@@ -134,6 +134,8 @@ typedef struct {
 #define CTAP_VENDOR_PHY_OPTS            0x05
 #define CTAP_VENDOR_MEMORY              0x06
 
+#define CTAP_VENDOR_MAINTENANCE         0x07
+
 #define CTAP_PERMISSION_MC              0x01  // MakeCredential
 #define CTAP_PERMISSION_GA              0x02  // GetAssertion
 #define CTAP_PERMISSION_CM              0x04  // CredentialManagement
