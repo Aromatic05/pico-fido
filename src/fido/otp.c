@@ -103,6 +103,7 @@ void append_keyboard_buffer(const uint8_t *buf, size_t len) {}
 #define CFGFLAG_UPDATE_MASK (PACING_10MS | PACING_20MS)
 
 static uint8_t config_seq = { 1 };
+static uint16_t config_seq_pending = 0;
 
 PACK(
 typedef struct otp_config {
@@ -222,7 +223,7 @@ int otp_button_pressed(uint8_t slot) {
     if (otp_config->cfg_flags & CHAL_YUBICO && otp_config->tkt_flags & CHAL_RESP) {
         return 2;
     }
-#ifdef ENABLE_OATH_APP
+#if ENABLE_OATH_APP
     if (otp_config->tkt_flags & OATH_HOTP) {
         uint8_t tmp_key[KEY_SIZE + 2];
         tmp_key[0] = 0x01;
@@ -372,6 +373,18 @@ uint16_t otp_status_ext() {
     return SW_OK();
 }
 
+static uint16_t otp_config_commit_status(bool is_otp) {
+    config_seq_pending++;
+    return otp_status(is_otp);
+}
+
+static void otp_publish_committed_config(void) {
+    if (config_seq_pending > 0 && !low_flash_is_pending()) {
+        config_seq = (uint8_t)(config_seq + config_seq_pending);
+        config_seq_pending = 0;
+    }
+}
+
 uint16_t otp_status(bool is_otp) {
     if (scanned == false) {
         scan_all();
@@ -381,10 +394,18 @@ uint16_t otp_status(bool is_otp) {
     if (is_otp) {
         res_APDU_size++;
     }
-    res_APDU[res_APDU_size++] = PICO_FIDO_VERSION_MAJOR;
-    res_APDU[res_APDU_size++] = PICO_FIDO_VERSION_MINOR;
+    res_APDU[res_APDU_size++] = PICO_FIDO_DEVICE_VERSION_MAJOR;
+    res_APDU[res_APDU_size++] = PICO_FIDO_DEVICE_VERSION_MINOR;
     res_APDU[res_APDU_size++] = 0;
-    res_APDU[res_APDU_size++] = config_seq;
+    /*
+     * CCID responses are held by the transport until low-flash commit is
+     * complete, so they must report the programming sequence that becomes
+     * durable with that response. OTP HID status reports, however, can be
+     * polled while a commit is still pending and must expose only committed
+     * state.
+     */
+    res_APDU[res_APDU_size++] =
+        is_otp ? config_seq : (uint8_t)(config_seq + config_seq_pending);
     uint8_t opts = 0;
     file_t *ef = search_dynamic_file(EF_OTP_SLOT1);
     if (file_has_data(ef)) {
@@ -444,14 +465,12 @@ int cmd_otp() {
                 memset(apdu.data + otp_config_size, 0, 8); // Add 8 bytes extra
                 file_put_data(ef, apdu.data, otp_config_size + 8);
                 low_flash_available();
-                config_seq++;
-                return otp_status(_is_otp);
+                return otp_config_commit_status(_is_otp);
             }
         }
         // Delete slot
         delete_file(ef);
-        config_seq++;
-        return otp_status(_is_otp);
+        return otp_config_commit_status(_is_otp);
     }
     else if (p1 == 0x04 || p1 == 0x05) { // Update slot
         otp_config_t *odata = (otp_config_t *) apdu.data;
@@ -483,7 +502,7 @@ int cmd_otp() {
             }
             file_put_data(ef, apdu.data, otp_config_size);
             low_flash_available();
-            config_seq++;
+            return otp_config_commit_status(_is_otp);
         }
         return otp_status(_is_otp);
     }
@@ -519,8 +538,7 @@ int cmd_otp() {
             delete_file(ef2);
         }
         low_flash_available();
-        config_seq++;
-        return otp_status(_is_otp);
+        return otp_config_commit_status(_is_otp);
     }
     else if (p1 == 0x10) {
         memcpy(res_APDU, pico_serial.id, 4);
@@ -528,7 +546,20 @@ int cmd_otp() {
         res_APDU_size = 4;
     }
     else if (p1 == 0x13) { // Get config
-        man_get_config();
+        if (man_get_config() != 0) {
+            return SW_WRONG_DATA();
+        }
+    }
+    else if (p1 == 0x15) { // Set device info
+        uint16_t request_len = (uint16_t)apdu.data[0] + 1;
+        if (request_len > apdu.nc) {
+            return SW_WRONG_LENGTH();
+        }
+        uint16_t sw = man_write_config(apdu.data, request_len);
+        if (sw != 0x9000) {
+            return sw;
+        }
+        return otp_config_commit_status(_is_otp);
     }
     else if (p1 == 0x14) {
         otp_status_ext();
@@ -663,11 +694,18 @@ int otp_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t repo
                     uint16_t residual_crc = calculate_crc(otp_frame_rx, 64), rcrc = get_uint16_t_le(otp_frame_rx + 65);
                     uint8_t slot_id = otp_frame_rx[64];
                     if (residual_crc == rcrc) {
-                        uint8_t hdr[5];
+                        if (!card_try_claim(ITF_KEYBOARD)) {
+                            return 1;
+                        }
+                        struct apdu saved_apdu = apdu;
+                        uint8_t hdr[5] = {0};
                         apdu.header = hdr;
                         apdu.data = otp_frame_rx;
                         apdu.nc = 64;
                         apdu.rdata = otp_frame_tx;
+                        apdu.rlen = 0;
+                        apdu.ne = 0;
+                        apdu.sw = 0;
                         apdu.header[0] = 0;
                         apdu.header[1] = 0x01;
                         apdu.header[2] = slot_id;
@@ -678,6 +716,8 @@ int otp_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t repo
                             otp_send_frame(apdu.rdata, apdu.rlen);
                         }
                         _is_otp = false;
+                        apdu = saved_apdu;
+                        card_release(ITF_KEYBOARD);
                     }
                     else {
                         printf("[OTP] Bad CRC!\n");
@@ -717,8 +757,20 @@ uint16_t otp_hid_get_report_cb(uint8_t itf,
         otp_curr_seq = otp_exp_seq = 0;
     }
     else {
-        res_APDU = buffer;
-        otp_status(true);
+        if (card_try_claim(ITF_KEYBOARD)) {
+            struct apdu saved_apdu = apdu;
+            res_APDU = buffer;
+            res_APDU_size = 0;
+            otp_publish_committed_config();
+            uint8_t old_status = status_byte;
+            if (config_seq_pending > 0 && status_byte == 0) {
+                status_byte = 0x01;
+            }
+            otp_status(true);
+            status_byte = old_status;
+            apdu = saved_apdu;
+            card_release(ITF_KEYBOARD);
+        }
         DEBUG_DATA(buffer, 8);
     }
 

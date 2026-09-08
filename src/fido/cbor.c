@@ -50,6 +50,9 @@ const uint8_t aaguid[16] = { 0x89, 0xFB, 0x94, 0xB7, 0x06, 0xC9, 0x36, 0x73, 0x9
 const uint8_t *cbor_data = NULL;
 size_t cbor_len = 0;
 uint8_t cbor_cmd = 0;
+uint8_t *cbor_response = NULL;
+/* cbor_process_to() callers hold the shared card claim, so transport state is serialized. */
+static fido_transport_t cbor_transport = FIDO_TRANSPORT_USB;
 
 int cbor_parse(uint8_t cmd, const uint8_t *data, size_t len) {
     if (len == 0 && cmd == CTAPHID_CBOR) {
@@ -58,7 +61,27 @@ int cbor_parse(uint8_t cmd, const uint8_t *data, size_t len) {
     if (len > 0) {
         DEBUG_DATA(data + 1, len - 1);
     }
-    if (cap_supported(CAP_FIDO2)) {
+    if (cbor_transport == FIDO_TRANSPORT_USB && cmd == CTAP_YUBIKEY_READ_CONFIG) {
+        if (cmd_read_config() == 0x9000) {
+            // Vendor CTAP replies are raw management bytes, not CTAP2 CBOR:
+            // shift over the reserved status byte; cbor_thread adds it back to the length.
+            memmove(cbor_response, res_APDU, res_APDU_size);
+            res_APDU_size -= 1;
+            return 0;
+        }
+        return CTAP1_ERR_INVALID_PARAMETER;
+    }
+    if (cbor_transport == FIDO_TRANSPORT_USB && cmd == CTAP_YUBIKEY_WRITE_CONFIG) {
+        uint16_t sw = man_write_config(data, (uint16_t)len);
+        if (sw == 0x9000) {
+            return 0;
+        }
+        if (sw == 0x6982) {
+            return CTAP2_ERR_NOT_ALLOWED;
+        }
+        return CTAP1_ERR_INVALID_PARAMETER;
+    }
+    if (cbor_transport != FIDO_TRANSPORT_USB || cap_supported(CAP_FIDO2)) {
         if (cmd == CTAPHID_CBOR) {
             if (data[0] != CTAP_GET_NEXT_ASSERTION) {
                 reset_gna_state();
@@ -96,13 +119,6 @@ int cbor_parse(uint8_t cmd, const uint8_t *data, size_t len) {
         }
         else if (cmd == CTAP_VENDOR_CBOR) {
             return cbor_vendor(data, len);
-        }
-        else if (cmd == 0xC2) {
-            if (cmd_read_config() == 0x9000) {
-                memmove(res_APDU-1, res_APDU, res_APDU_size);
-                res_APDU_size -= 1;
-                return 0;
-            }
         }
     }
     return CTAP1_ERR_INVALID_CMD;
@@ -142,14 +158,21 @@ void *cbor_thread(void *arg) {
     return NULL;
 }
 
-int cbor_process(uint8_t last_cmd, const uint8_t *data, size_t len) {
+int cbor_process_to(uint8_t last_cmd, const uint8_t *data, size_t len, uint8_t *response,
+                    fido_transport_t transport) {
     cbor_data = data;
     cbor_len = len;
     cbor_cmd = last_cmd;
-    ctap_resp->init.data[0] = 0;
-    res_APDU = ctap_resp->init.data + 1;
+    cbor_response = response;
+    cbor_transport = transport;
+    cbor_response[0] = 0;
+    res_APDU = cbor_response + 1;
     res_APDU_size = 0;
     return 2; // CBOR processing
+}
+
+int cbor_process(uint8_t last_cmd, const uint8_t *data, size_t len) {
+    return cbor_process_to(last_cmd, data, len, ctap_resp->init.data, FIDO_TRANSPORT_USB);
 }
 
 CborError COSE_key_params(int crv, int alg, mbedtls_ecp_group *grp, mbedtls_ecp_point *Q, CborEncoder *mapEncoderParent, CborEncoder *mapEncoder) {

@@ -124,6 +124,8 @@ typedef struct {
 #endif
 
 #define CTAP_VENDOR_CBOR            (CTAPHID_VENDOR_FIRST + 1)
+#define CTAP_YUBIKEY_READ_CONFIG     (CTAPHID_VENDOR_FIRST + 2)
+#define CTAP_YUBIKEY_WRITE_CONFIG    (CTAPHID_VENDOR_FIRST + 3)
 
 #define CTAP_VENDOR_BACKUP              0x01
 #define CTAP_VENDOR_MSE                 0x02

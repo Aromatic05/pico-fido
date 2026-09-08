@@ -82,8 +82,8 @@ int oath_select(app_t *a, uint8_t force) {
         res_APDU_size = 0;
         res_APDU[res_APDU_size++] = TAG_T_VERSION;
         res_APDU[res_APDU_size++] = 3;
-        res_APDU[res_APDU_size++] = PICO_FIDO_VERSION_MAJOR;
-        res_APDU[res_APDU_size++] = PICO_FIDO_VERSION_MINOR;
+        res_APDU[res_APDU_size++] = PICO_FIDO_DEVICE_VERSION_MAJOR;
+        res_APDU[res_APDU_size++] = PICO_FIDO_DEVICE_VERSION_MINOR;
         res_APDU[res_APDU_size++] = 0;
         res_APDU[res_APDU_size++] = TAG_NAME;
         res_APDU[res_APDU_size++] = 8;
@@ -122,6 +122,8 @@ INITIALIZER ( oath_ctor ) {
 }
 
 int oath_unload() {
+    validated = false;
+    memset(challenge, 0, sizeof(challenge));
     return PICOKEY_OK;
 }
 
