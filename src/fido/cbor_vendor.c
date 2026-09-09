@@ -37,6 +37,10 @@ __attribute__((weak)) int picokey_vendor_maintenance_start(void) {
 
 mse_t mse = { .init = false };
 
+void reset_vendor_mse_state(void) {
+    mbedtls_platform_zeroize(&mse, sizeof(mse));
+}
+
 int mse_decrypt_ct(uint8_t *data, size_t len) {
     mbedtls_chachapoly_context chatx;
     mbedtls_chachapoly_init(&chatx);

@@ -40,7 +40,8 @@ int cbor_reset() {
         return CTAP2_ERR_USER_ACTION_TIMEOUT;
     }
 #endif
-    initialize_flash(true);
-    init_fido();
+    if (reset_fido_application() != PICOKEY_OK) {
+        return CTAP1_ERR_OTHER;
+    }
     return 0;
 }

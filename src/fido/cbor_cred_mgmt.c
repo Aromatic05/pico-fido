@@ -30,6 +30,14 @@ uint8_t cred_counter = 1;
 uint8_t cred_total = 0;
 CborByteString rpIdHashx = { 0 };
 
+void reset_cred_mgmt_state() {
+    rp_counter = 1;
+    rp_total = 0;
+    cred_counter = 1;
+    cred_total = 0;
+    memset(&rpIdHashx, 0, sizeof(rpIdHashx));
+}
+
 int cbor_cred_mgmt(const uint8_t *data, size_t len) {
     CborParser parser;
     CborValue map;

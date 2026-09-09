@@ -84,6 +84,10 @@ static void oath_set_all_sessions_validated(bool validated) {
     }
 }
 
+void oath_reset_all_sessions() {
+    oath_set_all_sessions_validated(true);
+}
+
 const uint8_t oath_aid[] = {
     7,
     0xa0, 0x00, 0x00, 0x05, 0x27, 0x21, 0x01
@@ -286,14 +290,19 @@ int cmd_reset() {
     }
     for (int i = 0; i < MAX_OATH_CRED; i++) {
         file_t *ef = search_dynamic_file((uint16_t)(EF_OATH_CRED + i));
-        if (file_has_data(ef)) {
-            delete_file(ef);
+        if (file_has_data(ef) && delete_file(ef) != PICOKEY_OK) {
+            return SW_EXEC_ERROR();
         }
     }
-    delete_file(search_dynamic_file(EF_OATH_CODE));
-    flash_clear_file(search_by_fid(EF_OTP_PIN, NULL, SPECIFY_EF));
+    if (delete_file(search_dynamic_file(EF_OATH_CODE)) != PICOKEY_OK) {
+        return SW_EXEC_ERROR();
+    }
+    file_t *otp_pin = search_by_fid(EF_OTP_PIN, NULL, SPECIFY_EF);
+    if (file_has_data(otp_pin) && flash_clear_file(otp_pin) != PICOKEY_OK) {
+        return SW_EXEC_ERROR();
+    }
     low_flash_available();
-    oath_set_all_sessions_validated(true);
+    oath_reset_all_sessions();
     return SW_OK();
 }
 

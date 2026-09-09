@@ -137,6 +137,12 @@ static void hsmauth_clear_label_sessions(const uint8_t *label, uint8_t label_len
     }
 }
 
+void hsmauth_reset_all_sessions(void) {
+    for (size_t i = 0; i < APDU_SESSION_COUNT; ++i) {
+        hsmauth_clear_session(&hsmauth_sessions[i]);
+    }
+}
+
 typedef struct {
     uint8_t tag;
     uint16_t len;
@@ -1053,9 +1059,8 @@ static int cmd_reset(void) {
             return SW_EXEC_ERROR();
         }
     }
-    for (size_t i = 0; i < APDU_SESSION_COUNT; ++i) {
-        hsmauth_clear_session(&hsmauth_sessions[i]);
-    }
+    low_flash_available();
+    hsmauth_reset_all_sessions();
     return SW_OK();
 }
 

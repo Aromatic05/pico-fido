@@ -27,6 +27,16 @@
 static uint64_t expectedLength = 0, expectedNextOffset = 0;
 uint8_t temp_lba[MAX_LARGE_BLOB_SIZE];
 
+void reset_large_blob_state(void) {
+    expectedLength = 0;
+    expectedNextOffset = 0;
+    memset(temp_lba, 0, sizeof(temp_lba));
+}
+
+bool large_blob_write_in_progress(void) {
+    return expectedLength != 0 || expectedNextOffset != 0;
+}
+
 int cbor_large_blobs(const uint8_t *data, size_t len) {
     CborParser parser;
     CborValue map;

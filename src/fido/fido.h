@@ -48,6 +48,14 @@ extern int derive_key(const uint8_t *app_id,
 extern int verify_key(const uint8_t *appId, const uint8_t *keyHandle, mbedtls_ecp_keypair *);
 extern bool wait_button_pressed();
 extern void init_fido();
+extern int reset_fido_storage();
+extern int reset_fido_application();
+extern int reset_device_storage();
+extern void reset_fido_client_pin_state();
+extern void reset_cred_mgmt_state();
+extern void reset_large_blob_state(void);
+extern bool large_blob_write_in_progress(void);
+extern void reset_vendor_mse_state(void);
 extern mbedtls_ecp_group_id fido_curve_to_mbedtls(int curve);
 extern int mbedtls_curve_to_fido(mbedtls_ecp_group_id id);
 extern int fido_load_key(int curve, const uint8_t *cred_id, mbedtls_ecp_keypair *key);
@@ -147,6 +155,8 @@ extern uint32_t user_present_time_limit;
 
 extern pinUvAuthToken_t paut;
 extern persistentPinUvAuthToken_t ppaut;
+extern uint8_t keydev_dec[32];
+extern bool has_keydev_dec;
 
 extern int verify(uint8_t protocol, const uint8_t *key, const uint8_t *data, uint16_t len, uint8_t *sign);
 

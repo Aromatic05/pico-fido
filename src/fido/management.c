@@ -444,10 +444,8 @@ uint16_t man_write_config_maintenance(const uint8_t *request, uint16_t request_l
     return man_write_config_impl(request, request_len, true);
 }
 
-extern int cbor_reset();
 int cmd_factory_reset() {
-    cbor_reset();
-    return SW_OK();
+    return reset_device_storage() == PICOKEY_OK ? SW_OK() : SW_EXEC_ERROR();
 }
 
 int cmd_write_config() {
