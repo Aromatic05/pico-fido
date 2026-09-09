@@ -475,6 +475,100 @@ int scan_files_fido() {
     return PICOKEY_OK;
 }
 
+int reset_fido_storage() {
+    static const uint16_t fido_static_fids[] = {
+        EF_KEY_DEV,
+        EF_KEY_DEV_ENC,
+        EF_MKEK,
+        EF_EE_DEV,
+        EF_EE_DEV_EA,
+        EF_COUNTER,
+        EF_PIN,
+        EF_AUTHTOKEN,
+        EF_PAUTHTOKEN,
+        EF_MINPINLEN,
+        EF_OPTS,
+        EF_LARGEBLOB,
+    };
+
+    for (size_t i = 0; i < sizeof(fido_static_fids) / sizeof(fido_static_fids[0]); i++) {
+        file_t *ef = search_by_fid(fido_static_fids[i], NULL, SPECIFY_EF);
+        if (file_has_data(ef) && flash_clear_file(ef) != PICOKEY_OK) {
+            return PICOKEY_EXEC_ERROR;
+        }
+    }
+
+    /* Resident credentials, RP records and the PIN complexity policy are
+     * FIDO-owned dynamic files.  Device-management, OATH, OTP and HSM Auth
+     * records intentionally survive authenticatorReset. */
+    for (uint16_t i = 0; i < dynamic_files; i++) {
+        file_t *ef = &dynamic_file[i];
+        uint16_t fid = ef->fid;
+        bool owned = (fid >= EF_CRED && fid <= EF_CRED + 0xFF) ||
+                     (fid >= EF_RP && fid <= EF_RP + 0xFF) ||
+                     fid == EF_PIN_COMPLEXITY_POLICY;
+        if (owned && file_has_data(ef) && flash_clear_file(ef) != PICOKEY_OK) {
+            return PICOKEY_EXEC_ERROR;
+        }
+    }
+
+    low_flash_available();
+    return PICOKEY_OK;
+}
+
+extern void reset_gna_state();
+extern void hsmauth_reset_all_sessions(void);
+#if ENABLE_OATH_APP
+extern void oath_reset_all_sessions(void);
+#endif
+#if ENABLE_OTP_APP
+extern void otp_reset_runtime_state(void);
+#endif
+
+__attribute__((weak)) int picokey_prepare_device_reset(void) {
+    return PICOKEY_OK;
+}
+
+__attribute__((weak)) int picokey_finish_device_reset(void) {
+    return PICOKEY_OK;
+}
+
+static void reset_fido_transient_state() {
+    reset_gna_state();
+    reset_cred_mgmt_state();
+    reset_large_blob_state();
+    reset_vendor_mse_state();
+    reset_fido_client_pin_state();
+}
+
+int reset_fido_application() {
+    reset_fido_transient_state();
+    int ret = reset_fido_storage();
+    if (ret != PICOKEY_OK) {
+        return ret;
+    }
+    init_fido();
+    return PICOKEY_OK;
+}
+
+int reset_device_storage() {
+    reset_fido_transient_state();
+#if ENABLE_OATH_APP
+    oath_reset_all_sessions();
+#endif
+#if ENABLE_OTP_APP
+    otp_reset_runtime_state();
+#endif
+    hsmauth_reset_all_sessions();
+    int ret = picokey_prepare_device_reset();
+    if (ret != PICOKEY_OK) {
+        return ret;
+    }
+    initialize_flash(true);
+    init_fido();
+    return picokey_finish_device_reset();
+}
+
 void scan_all() {
     scan_flash();
     scan_files_fido();

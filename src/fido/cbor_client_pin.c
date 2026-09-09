@@ -25,6 +25,7 @@
 #include "mbedtls/ecdh.h"
 #include "mbedtls/sha256.h"
 #include "mbedtls/hkdf.h"
+#include "mbedtls/platform_util.h"
 #include "cbor.h"
 #include "ctap.h"
 #include "ctap2_cbor.h"
@@ -279,6 +280,23 @@ int check_keydev_encrypted(const uint8_t pin_token[32]) {
 }
 
 uint8_t new_pin_mismatches = 0;
+
+void reset_fido_client_pin_state() {
+    stopUsingPinUvAuthToken();
+    memset(&paut, 0, sizeof(paut));
+    memset(&ppaut, 0, sizeof(ppaut));
+    mbedtls_platform_zeroize(session_pin, sizeof(session_pin));
+    mbedtls_platform_zeroize(keydev_dec, sizeof(keydev_dec));
+    has_keydev_dec = false;
+    new_pin_mismatches = 0;
+    needs_power_cycle = false;
+    usage_timer = 0;
+    initial_usage_time_limit = 0;
+    if (hkey_init) {
+        mbedtls_ecdh_free(&hkey);
+        hkey_init = false;
+    }
+}
 
 int cbor_client_pin(const uint8_t *data, size_t len) {
     size_t resp_size = 0;

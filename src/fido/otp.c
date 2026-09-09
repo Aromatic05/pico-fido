@@ -661,6 +661,21 @@ uint8_t otp_header[4] = {0};
 
 extern uint16_t *get_send_buffer_size(uint8_t itf);
 
+void otp_reset_runtime_state(void) {
+    config_seq = 0;
+    config_seq_pending = 0;
+    scanned = false;
+    memset(session_counter, 0, sizeof(session_counter));
+    status_byte = 0;
+    _is_otp = false;
+    memset(otp_frame_rx, 0, sizeof(otp_frame_rx));
+    memset(otp_frame_tx, 0, sizeof(otp_frame_tx));
+    otp_exp_seq = 0;
+    otp_curr_seq = 0;
+    memset(otp_header, 0, sizeof(otp_header));
+    *get_send_buffer_size(ITF_KEYBOARD) = 0;
+}
+
 int otp_send_frame(uint8_t *frame, size_t frame_len) {
     uint16_t crc = calculate_crc(frame, frame_len);
     frame_len += put_uint16_t_le(~crc, frame + frame_len);
