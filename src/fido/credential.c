@@ -365,16 +365,38 @@ int credential_store(const uint8_t *cred_id, size_t cred_id_len, const uint8_t *
     memcpy(data, rp_id_hash, 32);
     memcpy(data + 32, cred_idr, CRED_RESIDENT_LEN);
     memcpy(data + 32 + CRED_RESIDENT_LEN, cred_id, cred_id_len);
-    file_t *ef = file_new((uint16_t)(EF_CRED + sloti));
-    file_put_data(ef, data, (uint16_t)record_len);
+    file_t *cred_ef = file_new((uint16_t)(EF_CRED + sloti));
+    if (cred_ef == NULL ||
+        file_put_data(cred_ef, data, (uint16_t)record_len) != PICOKEY_OK) {
+        credential_free(&cred);
+        return -1;
+    }
 
-    if (new_record == true) { //increase rps
+    if (new_record == true) {
         sloti = -1;
+        int free_slot = -1;
+        file_t *ef = NULL;
         for (uint16_t i = 0; i < MAX_RESIDENT_CREDENTIALS; i++) {
             ef = search_dynamic_file(EF_RP + i);
             if (!file_has_data(ef)) {
-                if (sloti == -1) {
-                    sloti = i;
+                if (free_slot == -1) {
+                    free_slot = i;
+                }
+                continue;
+            }
+            if (file_get_size(ef) < 33) {
+                if (free_slot == -1) {
+                    free_slot = i;
+                }
+                continue;
+            }
+            /* EF_RP is a derived index over EF_CRED. A sector-level power
+             * loss can commit the RP sector before the credential sector,
+             * leaving an orphan RP. Treat it as reusable instead of trusting
+             * the persisted one-byte count. */
+            if (credential_count_resident_for_rp(file_get_data(ef) + 1) == 0) {
+                if (free_slot == -1) {
+                    free_slot = i;
                 }
                 continue;
             }
@@ -384,35 +406,174 @@ int credential_store(const uint8_t *cred_id, size_t cred_id_len, const uint8_t *
             }
         }
         if (sloti == -1) {
+            sloti = free_slot;
+        }
+        if (sloti == -1) {
+            (void)flash_clear_file(cred_ef);
             credential_free(&cred);
             return -1;
         }
-        ef = search_dynamic_file((uint16_t)(EF_RP + sloti));
-        if (file_has_data(ef)) {
-            if (file_get_size(ef) > sizeof(data)) {
-                credential_free(&cred);
-                return -1;
-            }
-            memcpy(data, file_get_data(ef), file_get_size(ef));
-            data[0] += 1;
-            file_put_data(ef, data, file_get_size(ef));
+        ef = file_new((uint16_t)(EF_RP + sloti));
+        if (ef == NULL) {
+            (void)flash_clear_file(cred_ef);
+            credential_free(&cred);
+            return -1;
         }
-        else {
-            ef = file_new((uint16_t)(EF_RP + sloti));
-            size_t rp_record_len = 1 + 32 + cred.rpId.len;
-            if (rp_record_len > sizeof(data)) {
-                credential_free(&cred);
-                return -1;
-            }
-            data[0] = 1;
-            memcpy(data + 1, rp_id_hash, 32);
-            memcpy(data + 1 + 32, cred.rpId.data, cred.rpId.len);
-            file_put_data(ef, data, (uint16_t)rp_record_len);
+        uint16_t rp_count = credential_count_resident_for_rp(rp_id_hash);
+        size_t rp_record_len = 1 + 32 + cred.rpId.len;
+        if (rp_count == 0 || rp_record_len > sizeof(data)) {
+            (void)flash_clear_file(cred_ef);
+            credential_free(&cred);
+            return -1;
+        }
+        data[0] = rp_count > UINT8_MAX ? UINT8_MAX : (uint8_t)rp_count;
+        memcpy(data + 1, rp_id_hash, 32);
+        memcpy(data + 1 + 32, cred.rpId.data, cred.rpId.len);
+        if (file_put_data(ef, data, (uint16_t)rp_record_len) != PICOKEY_OK) {
+            (void)flash_clear_file(cred_ef);
+            credential_free(&cred);
+            return -1;
         }
     }
     credential_free(&cred);
     low_flash_available();
     return 0;
+}
+
+uint16_t credential_count_resident_for_rp(const uint8_t *rp_id_hash) {
+    if (rp_id_hash == NULL) {
+        return 0;
+    }
+    uint16_t count = 0;
+    for (uint16_t i = 0; i < MAX_RESIDENT_CREDENTIALS; i++) {
+        file_t *ef = search_dynamic_file((uint16_t)(EF_CRED + i));
+        if (file_has_data(ef) && file_get_size(ef) >= 32 &&
+            memcmp(file_get_data(ef), rp_id_hash, 32) == 0) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static file_t *credential_find_rp_record(const uint8_t *rp_id_hash) {
+    if (rp_id_hash == NULL) {
+        return NULL;
+    }
+    for (uint16_t i = 0; i < MAX_RESIDENT_CREDENTIALS; i++) {
+        file_t *ef = search_dynamic_file((uint16_t)(EF_RP + i));
+        if (file_has_data(ef) && file_get_size(ef) >= 33 &&
+            memcmp(file_get_data(ef) + 1, rp_id_hash, 32) == 0) {
+            return ef;
+        }
+    }
+    return NULL;
+}
+
+static int credential_find_free_rp_slot(void) {
+    for (uint16_t i = 0; i < MAX_RESIDENT_CREDENTIALS; i++) {
+        if (!file_has_data(search_dynamic_file((uint16_t)(EF_RP + i)))) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static int credential_delete_dynamic_record_deferred(file_t *ef) {
+    if (ef == NULL || !file_has_data(ef)) {
+        return PICOKEY_ERR_FILE_NOT_FOUND;
+    }
+    int ret = flash_clear_file(ef);
+    if (ret == PICOKEY_OK) {
+        ret = delete_dynamic_file(ef);
+    }
+    return ret;
+}
+
+int credential_reconcile_resident_store(void) {
+    /* EF_CRED is authoritative. EF_RP is only a discovery index and can tear
+     * independently if power is lost between two committed sectors. */
+    uint8_t record[512] = {0};
+    for (uint16_t i = 0; i < MAX_RESIDENT_CREDENTIALS; i++) {
+        file_t *rp = search_dynamic_file((uint16_t)(EF_RP + i));
+        if (!file_has_data(rp)) {
+            continue;
+        }
+        if (file_get_size(rp) < 33) {
+            if (credential_delete_dynamic_record_deferred(rp) != PICOKEY_OK) {
+                return PICOKEY_EXEC_ERROR;
+            }
+            continue;
+        }
+
+        uint16_t count = credential_count_resident_for_rp(file_get_data(rp) + 1);
+        if (count == 0) {
+            if (credential_delete_dynamic_record_deferred(rp) != PICOKEY_OK) {
+                return PICOKEY_EXEC_ERROR;
+            }
+            continue;
+        }
+
+        uint8_t cached_count = count > UINT8_MAX ? UINT8_MAX : (uint8_t)count;
+        if (file_get_data(rp)[0] != cached_count) {
+            uint16_t len = file_get_size(rp);
+            if (len > sizeof(record)) {
+                return PICOKEY_ERR_MEMORY_FATAL;
+            }
+            memcpy(record, file_get_data(rp), len);
+            record[0] = cached_count;
+            int ret = file_put_data(rp, record, len);
+            mbedtls_platform_zeroize(record, sizeof(record));
+            if (ret != PICOKEY_OK) {
+                return ret;
+            }
+        }
+    }
+
+    for (uint16_t i = 0; i < MAX_RESIDENT_CREDENTIALS; i++) {
+        file_t *cred_file = search_dynamic_file((uint16_t)(EF_CRED + i));
+        if (!file_has_data(cred_file) || file_get_size(cred_file) < 33) {
+            continue;
+        }
+        const uint8_t *rp_id_hash = file_get_data(cred_file);
+        if (credential_find_rp_record(rp_id_hash) != NULL) {
+            continue;
+        }
+
+        Credential cred = {0};
+        int ret = credential_load_resident(cred_file, rp_id_hash, &cred);
+        if (ret != PICOKEY_OK) {
+            /* Externally wrapped roots may be unavailable until vendor unlock.
+             * Never delete an undecodable credential during recovery. */
+            credential_free(&cred);
+            continue;
+        }
+
+        int slot = credential_find_free_rp_slot();
+        uint16_t count = credential_count_resident_for_rp(rp_id_hash);
+        size_t record_len = 1 + 32 + cred.rpId.len;
+        if (slot < 0 || count == 0 || record_len > sizeof(record)) {
+            credential_free(&cred);
+            return PICOKEY_ERR_MEMORY_FATAL;
+        }
+        file_t *rp = file_new((uint16_t)(EF_RP + slot));
+        if (rp == NULL) {
+            credential_free(&cred);
+            return PICOKEY_ERR_NO_MEMORY;
+        }
+        memset(record, 0, sizeof(record));
+        record[0] = count > UINT8_MAX ? UINT8_MAX : (uint8_t)count;
+        memcpy(record + 1, rp_id_hash, 32);
+        memcpy(record + 33, cred.rpId.data, cred.rpId.len);
+        ret = file_put_data(rp, record, (uint16_t)record_len);
+        mbedtls_platform_zeroize(record, sizeof(record));
+        credential_free(&cred);
+        if (ret != PICOKEY_OK) {
+            return ret;
+        }
+    }
+
+    low_flash_available();
+    return PICOKEY_OK;
 }
 
 int credential_derive_hmac_key(const uint8_t *cred_id, size_t cred_id_len, uint8_t *outk) {

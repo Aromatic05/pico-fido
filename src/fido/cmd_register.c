@@ -55,12 +55,13 @@ const uint8_t *bogus_chrome = (const uint8_t *) "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 
 extern int ctap_error(uint8_t error);
 int cmd_register() {
+    if (!fido_is_ready()) {
+        return SW_EXEC_ERROR();
+    }
     CTAP_REGISTER_REQ *req = (CTAP_REGISTER_REQ *) apdu.data;
     CTAP_REGISTER_RESP *resp = (CTAP_REGISTER_RESP *) res_APDU;
     resp->registerId = CTAP_REGISTER_ID;
     resp->keyHandleLen = KEY_HANDLE_LEN;
-    //if (scan_files_fido(true) != PICOKEY_OK)
-    //    return SW_EXEC_ERROR();
     if (apdu.nc != CTAP_APPID_SIZE + CTAP_CHAL_SIZE) {
         return SW_WRONG_LENGTH();
     }

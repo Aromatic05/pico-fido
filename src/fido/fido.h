@@ -47,7 +47,8 @@ extern int derive_key(const uint8_t *app_id,
                       mbedtls_ecp_keypair *key);
 extern int verify_key(const uint8_t *appId, const uint8_t *keyHandle, mbedtls_ecp_keypair *);
 extern bool wait_button_pressed();
-extern void init_fido();
+extern int init_fido();
+extern bool fido_is_ready(void);
 extern int reset_fido_storage();
 extern int reset_fido_application();
 extern int reset_device_storage();
@@ -110,8 +111,11 @@ extern void clearUserVerifiedFlag();
 extern void clearPinUvAuthTokenPermissionsExceptLbw();
 extern void send_keepalive();
 extern uint32_t get_sign_counter();
+extern int reserve_sign_counter(uint32_t *current);
 extern uint8_t get_opts();
-extern void set_opts(uint8_t);
+extern int set_opts(uint8_t);
+extern int fido_store_keydev_external(const uint8_t *data, size_t len);
+extern int fido_store_keydev_plain(const uint8_t *data, size_t len);
 #define MAX_CREDENTIAL_COUNT_IN_LIST 16
 #define MAX_CRED_ID_LENGTH        1024
 #define MAX_RESIDENT_CREDENTIALS  256

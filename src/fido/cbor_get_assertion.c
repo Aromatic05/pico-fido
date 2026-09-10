@@ -613,7 +613,10 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
         }
     }
 
-    uint32_t ctr = get_sign_counter();
+    uint32_t ctr = 0;
+    if (reserve_sign_counter(&ctr) != PICOKEY_OK) {
+        CBOR_ERROR(CTAP2_ERR_PROCESSING);
+    }
 
     size_t aut_data_len = 32 + 1 + 4 + ext_len;
     if (aut_data_len + clientDataHash.len > sizeof(aut_data)) {
@@ -748,9 +751,6 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
     mbedtls_platform_zeroize(largeBlobKey, sizeof(largeBlobKey));
     CBOR_CHECK(cbor_encoder_close_container(&encoder, &mapEncoder));
     resp_size = cbor_encoder_get_buffer_size(&encoder, cbor_response + 1);
-    ctr++;
-    file_put_data(ef_counter, (uint8_t *) &ctr, sizeof(ctr));
-    low_flash_available();
 err:
     mbedtls_platform_zeroize(aut_data, sizeof(aut_data));
     CBOR_FREE_BYTE_STRING(clientDataHash);

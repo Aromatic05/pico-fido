@@ -21,6 +21,7 @@
 #include "ctap.h"
 #include "hid/ctap_hid.h"
 #include "files.h"
+#include "credential.h"
 #include "apdu.h"
 #include "random.h"
 #include "mbedtls/ecdh.h"
@@ -119,12 +120,21 @@ int cbor_vendor_generic(uint8_t cmd, const uint8_t *data, size_t len) {
             if (vendorParam.present == false) {
                 CBOR_ERROR(CTAP2_ERR_MISSING_PARAMETER);
             }
-            uint8_t zeros[32];
-            memset(zeros, 0, sizeof(zeros));
-            file_put_data(ef_keydev_enc, vendorParam.data, (uint16_t)vendorParam.len);
-            file_put_data(ef_keydev, zeros, file_get_size(ef_keydev)); // Overwrite ef with 0
-            file_put_data(ef_keydev, NULL, 0); // Set ef to 0 bytes
-            low_flash_available();
+            if (vendorParam.len != 60) {
+                CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
+            }
+            /* Restore intentionally works without an existing FIDO PIN so a
+             * mnemonic backup can recover a reset authenticator. It is still
+             * destructive to the active device root and must not be callable
+             * silently by arbitrary host software. */
+            if (check_user_presence() == false) {
+                CBOR_ERROR(CTAP2_ERR_OPERATION_DENIED);
+            }
+            if (fido_store_keydev_external(vendorParam.data, vendorParam.len) != PICOKEY_OK) {
+                CBOR_ERROR(CTAP2_ERR_PROCESSING);
+            }
+            mbedtls_platform_zeroize(keydev_dec, sizeof(keydev_dec));
+            has_keydev_dec = false;
             goto err;
         }
         else {
@@ -186,6 +196,9 @@ int cbor_vendor_generic(uint8_t cmd, const uint8_t *data, size_t len) {
         if (mse.init == false) {
             CBOR_ERROR(CTAP2_ERR_NOT_ALLOWED);
         }
+        if (vendorParam.len != 48) {
+            CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
+        }
 
         mbedtls_chachapoly_context chatx;
         int ret = mse_decrypt_ct(vendorParam.data, vendorParam.len);
@@ -199,6 +212,9 @@ int cbor_vendor_generic(uint8_t cmd, const uint8_t *data, size_t len) {
 
         uint8_t *keyenc = file_get_data(ef_keydev_enc);
         size_t keyenc_len = file_get_size(ef_keydev_enc);
+        if (keyenc_len != 60) {
+            CBOR_ERROR(CTAP2_ERR_INTEGRITY_FAILURE);
+        }
         mbedtls_chachapoly_init(&chatx);
         mbedtls_chachapoly_setkey(&chatx, vendorParam.data);
         ret = mbedtls_chachapoly_auth_decrypt(&chatx, sizeof(keydev_dec), keyenc, NULL, 0, keyenc + keyenc_len - 16, keyenc + 12, keydev_dec);
@@ -207,6 +223,11 @@ int cbor_vendor_generic(uint8_t cmd, const uint8_t *data, size_t len) {
             CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
         }
         has_keydev_dec = true;
+        if (credential_reconcile_resident_store() != PICOKEY_OK) {
+            mbedtls_platform_zeroize(keydev_dec, sizeof(keydev_dec));
+            has_keydev_dec = false;
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
+        }
         goto err;
     }
     else if (cmd == CTAP_VENDOR_EA) {

@@ -27,8 +27,6 @@
 #endif
 #include "fs/phy.h"
 
-extern void scan_all();
-
 int cbor_reset() {
 #ifndef ENABLE_EMULATION
 #if defined(ENABLE_POWER_ON_RESET) && ENABLE_POWER_ON_RESET == 1

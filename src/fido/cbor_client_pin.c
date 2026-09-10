@@ -46,6 +46,7 @@ bool needs_power_cycle = false;
 static mbedtls_ecdh_context hkey;
 static bool hkey_init = false;
 extern int encrypt_keydev_f1(const uint8_t keydev[32]);
+extern int encrypt_keydev_f1_deferred(const uint8_t keydev[32]);
 
 int beginUsingPinUvAuthToken(bool userIsPresent) {
     paut.user_present = userIsPresent;
@@ -145,33 +146,72 @@ int ecdh(uint8_t protocol, const mbedtls_ecp_point *Q, uint8_t *sharedSecret) {
     return ret;
 }
 
-void resetAuthToken(bool persistent) {
+static int resetAuthToken(bool persistent, bool publish) {
     uint16_t fid = EF_AUTHTOKEN;
     if (persistent) {
         fid = EF_PAUTHTOKEN;
     }
     file_t *ef = search_by_fid(fid, NULL, SPECIFY_EF);
+    if (ef == NULL) {
+        return PICOKEY_ERR_FILE_NOT_FOUND;
+    }
     uint8_t t[32];
     random_gen(NULL, t, sizeof(t));
-    file_put_data(ef, t, sizeof(t));
-    low_flash_available();
+    int ret = file_put_data(ef, t, sizeof(t));
+    mbedtls_platform_zeroize(t, sizeof(t));
+    if (ret != PICOKEY_OK) {
+        return ret;
+    }
+    if (publish) {
+        low_flash_available();
+    }
+    return PICOKEY_OK;
 }
 
 int resetPinUvAuthToken() {
-    resetAuthToken(false);
+    int ret = resetAuthToken(false, true);
+    if (ret != PICOKEY_OK) {
+        return ret;
+    }
     paut.permissions = 0;
     paut.data = file_get_data(ef_authtoken);
     paut.len = file_get_size(ef_authtoken);
-    return 0;
+    return PICOKEY_OK;
 }
 
 int resetPersistentPinUvAuthToken() {
-    resetAuthToken(true);
+    int ret = resetAuthToken(true, true);
+    if (ret != PICOKEY_OK) {
+        return ret;
+    }
     file_t *ef_pauthtoken = search_by_fid(EF_PAUTHTOKEN, NULL, SPECIFY_EF);
     ppaut.permissions = 0;
     ppaut.data = file_get_data(ef_pauthtoken);
     ppaut.len = file_get_size(ef_pauthtoken);
-    return 0;
+    return PICOKEY_OK;
+}
+
+int resetPinUvAuthTokenDeferred() {
+    int ret = resetAuthToken(false, false);
+    if (ret != PICOKEY_OK) {
+        return ret;
+    }
+    paut.permissions = 0;
+    paut.data = file_get_data(ef_authtoken);
+    paut.len = file_get_size(ef_authtoken);
+    return PICOKEY_OK;
+}
+
+int resetPersistentPinUvAuthTokenDeferred() {
+    int ret = resetAuthToken(true, false);
+    if (ret != PICOKEY_OK) {
+        return ret;
+    }
+    file_t *ef_pauthtoken = search_by_fid(EF_PAUTHTOKEN, NULL, SPECIFY_EF);
+    ppaut.permissions = 0;
+    ppaut.data = file_get_data(ef_pauthtoken);
+    ppaut.len = file_get_size(ef_pauthtoken);
+    return PICOKEY_OK;
 }
 
 int encrypt(uint8_t protocol, const uint8_t *key, const uint8_t *in, uint16_t in_len, uint8_t *out) {
@@ -238,8 +278,19 @@ int verify(uint8_t protocol, const uint8_t *key, const uint8_t *data, uint16_t l
 }
 
 int initialize() {
-    regenerate();
-    return resetPinUvAuthToken();
+    int ret = regenerate();
+    if (ret != 0) {
+        mbedtls_ecdh_free(&hkey);
+        hkey_init = false;
+        return PICOKEY_EXEC_ERROR;
+    }
+    ret = resetPinUvAuthToken();
+    if (ret != PICOKEY_OK) {
+        mbedtls_ecdh_free(&hkey);
+        hkey_init = false;
+        return ret;
+    }
+    return PICOKEY_OK;
 }
 
 int getPublicKey() {
@@ -267,19 +318,113 @@ int pinUvAuthTokenUsageTimerObserver() {
     return 0;
 }
 
-int check_keydev_encrypted(const uint8_t pin_token[32]) {
+static int check_keydev_encrypted_impl(const uint8_t pin_token[32], bool publish) {
     if (file_get_data(ef_keydev) && *file_get_data(ef_keydev) == 0x01) {
         uint8_t tmp_keydev[61];
         tmp_keydev[0] = 0x02; // Change format to encrypted
         encrypt_with_aad(pin_token, file_get_data(ef_keydev) + 1, 32, tmp_keydev + 1);
-        file_put_data(ef_keydev, tmp_keydev, sizeof(tmp_keydev));
+        int ret = file_put_data(ef_keydev, tmp_keydev, sizeof(tmp_keydev));
         mbedtls_platform_zeroize(tmp_keydev, sizeof(tmp_keydev));
-        low_flash_available();
+        if (ret != PICOKEY_OK) {
+            return ret;
+        }
+        if (publish) {
+            low_flash_available();
+        }
     }
     return PICOKEY_OK;
 }
 
+int check_keydev_encrypted(const uint8_t pin_token[32]) {
+    return check_keydev_encrypted_impl(pin_token, true);
+}
+
+static int check_keydev_encrypted_deferred(const uint8_t pin_token[32]) {
+    return check_keydev_encrypted_impl(pin_token, false);
+}
+
 uint8_t new_pin_mismatches = 0;
+
+typedef struct {
+    uint8_t keydev[64];
+    uint16_t keydev_len;
+    uint8_t pin[35];
+    uint16_t pin_len;
+    uint8_t minpin[2 + MAX_MINPIN_RPIDS * 32];
+    uint16_t minpin_len;
+    uint8_t authtoken[32];
+    uint16_t authtoken_len;
+    uint8_t pauthtoken[32];
+    uint16_t pauthtoken_len;
+} pin_change_snapshot_t;
+
+static int capture_pin_change_snapshot(pin_change_snapshot_t *snapshot, file_t *ef_minpin) {
+    memset(snapshot, 0, sizeof(*snapshot));
+    if (!file_has_data(ef_keydev) || !file_has_data(ef_pin)) {
+        return PICOKEY_ERR_FILE_NOT_FOUND;
+    }
+    snapshot->keydev_len = file_get_size(ef_keydev);
+    snapshot->pin_len = file_get_size(ef_pin);
+    if (snapshot->keydev_len > sizeof(snapshot->keydev) ||
+        snapshot->pin_len > sizeof(snapshot->pin)) {
+        return PICOKEY_ERR_MEMORY_FATAL;
+    }
+    memcpy(snapshot->keydev, file_get_data(ef_keydev), snapshot->keydev_len);
+    memcpy(snapshot->pin, file_get_data(ef_pin), snapshot->pin_len);
+    if (file_has_data(ef_minpin)) {
+        snapshot->minpin_len = file_get_size(ef_minpin);
+        if (snapshot->minpin_len > sizeof(snapshot->minpin)) {
+            return PICOKEY_ERR_MEMORY_FATAL;
+        }
+        memcpy(snapshot->minpin, file_get_data(ef_minpin), snapshot->minpin_len);
+    }
+    file_t *ef_pauthtoken = search_by_fid(EF_PAUTHTOKEN, NULL, SPECIFY_EF);
+    if (file_has_data(ef_authtoken)) {
+        snapshot->authtoken_len = file_get_size(ef_authtoken);
+        if (snapshot->authtoken_len > sizeof(snapshot->authtoken)) {
+            return PICOKEY_ERR_MEMORY_FATAL;
+        }
+        memcpy(snapshot->authtoken, file_get_data(ef_authtoken), snapshot->authtoken_len);
+    }
+    if (file_has_data(ef_pauthtoken)) {
+        snapshot->pauthtoken_len = file_get_size(ef_pauthtoken);
+        if (snapshot->pauthtoken_len > sizeof(snapshot->pauthtoken)) {
+            return PICOKEY_ERR_MEMORY_FATAL;
+        }
+        memcpy(snapshot->pauthtoken, file_get_data(ef_pauthtoken), snapshot->pauthtoken_len);
+    }
+    return PICOKEY_OK;
+}
+
+static int restore_pin_change_snapshot(const pin_change_snapshot_t *snapshot, file_t *ef_minpin) {
+    int ret = file_put_data(ef_keydev, snapshot->keydev, snapshot->keydev_len);
+    if (ret == PICOKEY_OK) {
+        ret = file_put_data(ef_pin, snapshot->pin, snapshot->pin_len);
+    }
+    if (ret == PICOKEY_OK && snapshot->minpin_len > 0) {
+        ret = file_put_data(ef_minpin, snapshot->minpin, snapshot->minpin_len);
+    }
+    if (ret == PICOKEY_OK && snapshot->authtoken_len > 0) {
+        ret = file_put_data(ef_authtoken, snapshot->authtoken, snapshot->authtoken_len);
+    }
+    if (ret == PICOKEY_OK && snapshot->pauthtoken_len > 0) {
+        file_t *ef_pauthtoken = search_by_fid(EF_PAUTHTOKEN, NULL, SPECIFY_EF);
+        ret = file_put_data(ef_pauthtoken, snapshot->pauthtoken, snapshot->pauthtoken_len);
+    }
+    return ret;
+}
+
+static void clear_pin_change_snapshot(pin_change_snapshot_t *snapshot) {
+    mbedtls_platform_zeroize(snapshot, sizeof(*snapshot));
+}
+
+static void rollback_pin_change(pin_change_snapshot_t *snapshot, file_t *ef_minpin) {
+    if (restore_pin_change_snapshot(snapshot, ef_minpin) != PICOKEY_OK) {
+        needs_power_cycle = true;
+    }
+    clear_pin_change_snapshot(snapshot);
+    mbedtls_platform_zeroize(session_pin, sizeof(session_pin));
+}
 
 void reset_fido_client_pin_state() {
     stopUsingPinUvAuthToken();
@@ -312,7 +457,9 @@ int cbor_client_pin(const uint8_t *data, size_t len) {
     uint64_t val_c = 1;
     uint8_t keydev[32] = {0};
     if (hkey_init == false) {
-        initialize();
+        if (initialize() != PICOKEY_OK) {
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
+        }
     }
     CBOR_PARSE_MAP_START(map, 1)
     {
@@ -440,13 +587,20 @@ int cbor_client_pin(const uint8_t *data, size_t len) {
         mbedtls_md(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), paddedNewPin, pin_len, dhash);
         mbedtls_platform_zeroize(paddedNewPin, sizeof(paddedNewPin));
         pin_derive_verifier(dhash, 16, hsh + 3);
-        file_put_data(ef_pin, hsh, sizeof(hsh));
-        low_flash_available();
-
+        ret = file_put_data(ef_pin, hsh, sizeof(hsh));
+        if (ret != PICOKEY_OK) {
+            mbedtls_platform_zeroize(hsh, sizeof(hsh));
+            mbedtls_platform_zeroize(dhash, sizeof(dhash));
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
+        }
         pin_derive_session(dhash, 16, session_pin);
         ret = check_keydev_encrypted(session_pin);
         if (ret != PICOKEY_OK) {
-            CBOR_ERROR(ret);
+            (void)flash_clear_file(ef_pin);
+            mbedtls_platform_zeroize(hsh, sizeof(hsh));
+            mbedtls_platform_zeroize(dhash, sizeof(dhash));
+            mbedtls_platform_zeroize(session_pin, sizeof(session_pin));
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
         }
         mbedtls_platform_zeroize(hsh, sizeof(hsh));
         mbedtls_platform_zeroize(dhash, sizeof(dhash));
@@ -499,7 +653,12 @@ int cbor_client_pin(const uint8_t *data, size_t len) {
         uint8_t pin_data[35];
         memcpy(pin_data, file_get_data(ef_pin), file_get_size(ef_pin));
         pin_data[0] -= 1;
-        file_put_data(ef_pin, pin_data, file_get_size(ef_pin));
+        ret = file_put_data(ef_pin, pin_data, file_get_size(ef_pin));
+        if (ret != PICOKEY_OK) {
+            mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
+            mbedtls_platform_zeroize(pin_data, sizeof(pin_data));
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
+        }
         low_flash_available();
         uint8_t retries = pin_data[0];
         uint8_t paddedNewPin[64];
@@ -541,16 +700,22 @@ int cbor_client_pin(const uint8_t *data, size_t len) {
             if (ret != PICOKEY_OK) {
                 CBOR_ERROR(CTAP2_ERR_PIN_INVALID);
             }
-            encrypt_keydev_f1(keydev);
+            ret = encrypt_keydev_f1(keydev);
+            if (ret != PICOKEY_OK) {
+                CBOR_ERROR(CTAP2_ERR_PROCESSING);
+            }
         }
         pin_derive_session(paddedNewPin, 16, session_pin);
         pin_data[0] = MAX_PIN_RETRIES;
-        file_put_data(ef_pin, pin_data, sizeof(pin_data));
+        ret = file_put_data(ef_pin, pin_data, sizeof(pin_data));
+        if (ret != PICOKEY_OK) {
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
+        }
         low_flash_available();
 
         ret = check_keydev_encrypted(session_pin);
         if (ret != PICOKEY_OK) {
-            CBOR_ERROR(ret);
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
         }
 
         new_pin_mismatches = 0;
@@ -575,45 +740,81 @@ int cbor_client_pin(const uint8_t *data, size_t len) {
             CBOR_ERROR(CTAP2_ERR_PIN_POLICY_VIOLATION);
         }
 
-        // New PIN is valid and verified
-        ret = load_keydev(keydev);
-        if (ret != PICOKEY_OK) {
-            CBOR_ERROR(CTAP2_ERR_PIN_INVALID);
-        }
-        encrypt_keydev_f1(keydev);
-
+        // Build and validate the new PIN record before mutating keydev.
         mbedtls_md(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), paddedNewPin, pin_len, dhash);
-        pin_derive_session(dhash, 16, session_pin);
-        ret = check_keydev_encrypted(session_pin);
-        if (ret != PICOKEY_OK) {
-            CBOR_ERROR(ret);
-        }
-        low_flash_available();
-
         pin_data[0] = MAX_PIN_RETRIES;
         pin_data[1] = pin_len;
         pin_data[2] = 1; // New format indicator
         pin_derive_verifier(dhash, 16, pin_data + 3);
-
         if (file_has_data(ef_minpin) && file_get_data(ef_minpin)[1] == 1 && ct_memcmp(pin_data + 3, file_get_data(ef_pin) + 3, 32) == 0) {
             CBOR_ERROR(CTAP2_ERR_PIN_POLICY_VIOLATION);
         }
-        file_put_data(ef_pin, pin_data, sizeof(pin_data));
+
+        pin_change_snapshot_t change_snapshot;
+        ret = capture_pin_change_snapshot(&change_snapshot, ef_minpin);
+        if (ret != PICOKEY_OK) {
+            mbedtls_platform_zeroize(pin_data, sizeof(pin_data));
+            mbedtls_platform_zeroize(dhash, sizeof(dhash));
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
+        }
+
+        // Queue the keydev transition and new verifier without publishing
+        // either one. Only the final low_flash_available() makes the complete
+        // change visible to the flash worker.
+        ret = load_keydev(keydev);
+        if (ret != PICOKEY_OK) {
+            clear_pin_change_snapshot(&change_snapshot);
+            CBOR_ERROR(CTAP2_ERR_PIN_INVALID);
+        }
+        ret = encrypt_keydev_f1_deferred(keydev);
+        if (ret != PICOKEY_OK) {
+            rollback_pin_change(&change_snapshot, ef_minpin);
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
+        }
+        pin_derive_session(dhash, 16, session_pin);
+        ret = check_keydev_encrypted_deferred(session_pin);
+        if (ret != PICOKEY_OK) {
+            rollback_pin_change(&change_snapshot, ef_minpin);
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
+        }
+
+        ret = file_put_data(ef_pin, pin_data, sizeof(pin_data));
+        if (ret != PICOKEY_OK) {
+            rollback_pin_change(&change_snapshot, ef_minpin);
+            mbedtls_platform_zeroize(pin_data, sizeof(pin_data));
+            mbedtls_platform_zeroize(dhash, sizeof(dhash));
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
+        }
 
         mbedtls_platform_zeroize(pin_data, sizeof(pin_data));
         mbedtls_platform_zeroize(dhash, sizeof(dhash));
         if (file_has_data(ef_minpin) && file_get_data(ef_minpin)[1] == 1) {
             uint8_t tmpf[2 + MAX_MINPIN_RPIDS * 32];
             if (file_get_size(ef_minpin) > sizeof(tmpf)) {
+                rollback_pin_change(&change_snapshot, ef_minpin);
                 CBOR_ERROR(CTAP2_ERR_PROCESSING);
             }
             memcpy(tmpf, file_get_data(ef_minpin), file_get_size(ef_minpin));
             tmpf[1] = 0;
-            file_put_data(ef_minpin, tmpf, file_get_size(ef_minpin));
+            if (file_put_data(ef_minpin, tmpf, file_get_size(ef_minpin)) != PICOKEY_OK) {
+                mbedtls_platform_zeroize(tmpf, sizeof(tmpf));
+                rollback_pin_change(&change_snapshot, ef_minpin);
+                CBOR_ERROR(CTAP2_ERR_PROCESSING);
+            }
+            mbedtls_platform_zeroize(tmpf, sizeof(tmpf));
         }
+        ret = resetPinUvAuthTokenDeferred();
+        if (ret != PICOKEY_OK) {
+            rollback_pin_change(&change_snapshot, ef_minpin);
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
+        }
+        ret = resetPersistentPinUvAuthTokenDeferred();
+        if (ret != PICOKEY_OK) {
+            rollback_pin_change(&change_snapshot, ef_minpin);
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
+        }
+        clear_pin_change_snapshot(&change_snapshot);
         low_flash_available();
-        resetPinUvAuthToken();
-        resetPersistentPinUvAuthToken();
         needs_power_cycle = false;
         goto err; // No return
     }
@@ -663,7 +864,12 @@ int cbor_client_pin(const uint8_t *data, size_t len) {
         uint8_t pin_data[35];
         memcpy(pin_data, file_get_data(ef_pin), file_get_size(ef_pin));
         pin_data[0] -= 1;
-        file_put_data(ef_pin, pin_data, file_get_size(ef_pin));
+        ret = file_put_data(ef_pin, pin_data, file_get_size(ef_pin));
+        if (ret != PICOKEY_OK) {
+            mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
+            mbedtls_platform_zeroize(pin_data, sizeof(pin_data));
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
+        }
         low_flash_available();
         uint8_t retries = pin_data[0];
         uint8_t paddedNewPin[64], poff = ((uint8_t)pinUvAuthProtocol - 1) * IV_SIZE;
@@ -706,19 +912,26 @@ int cbor_client_pin(const uint8_t *data, size_t len) {
             if (ret != PICOKEY_OK) {
                 CBOR_ERROR(CTAP2_ERR_PIN_INVALID);
             }
-            encrypt_keydev_f1(keydev);
+            ret = encrypt_keydev_f1(keydev);
+            if (ret != PICOKEY_OK) {
+                CBOR_ERROR(CTAP2_ERR_PROCESSING);
+            }
         }
 
         pin_derive_session(paddedNewPin, 16, session_pin);
         ret = check_keydev_encrypted(session_pin);
         if (ret != PICOKEY_OK) {
-            CBOR_ERROR(ret);
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
         }
 
         pin_data[0] = MAX_PIN_RETRIES;
         new_pin_mismatches = 0;
 
-        file_put_data(ef_pin, pin_data, sizeof(pin_data));
+        ret = file_put_data(ef_pin, pin_data, sizeof(pin_data));
+        if (ret != PICOKEY_OK) {
+            mbedtls_platform_zeroize(pin_data, sizeof(pin_data));
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
+        }
         mbedtls_platform_zeroize(pin_data, sizeof(pin_data));
 
         low_flash_available();
@@ -732,7 +945,10 @@ int cbor_client_pin(const uint8_t *data, size_t len) {
             pdata = ppaut.data;
         }
         else {
-            resetPinUvAuthToken();
+            ret = resetPinUvAuthToken();
+            if (ret != PICOKEY_OK) {
+                CBOR_ERROR(CTAP2_ERR_PROCESSING);
+            }
             beginUsingPinUvAuthToken(false);
             if (subcommand == 0x05) {
                 permissions = CTAP_PERMISSION_MC | CTAP_PERMISSION_GA;

@@ -198,7 +198,7 @@ int cbor_get_info() {
     CBOR_CHECK(cbor_encoder_close_container(&encoder, &mapEncoder));
 err:
     if (error != CborNoError) {
-        return -CTAP2_ERR_INVALID_CBOR;
+        return CTAP2_ERR_INVALID_CBOR;
     }
     res_APDU_size = (uint16_t)cbor_encoder_get_buffer_size(&encoder, cbor_response + 1);
     return 0;

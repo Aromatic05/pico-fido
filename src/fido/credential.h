@@ -106,5 +106,7 @@ extern int credential_derive_large_blob_key(const uint8_t *cred_id,
 extern int credential_derive_resident(const uint8_t *cred_id, size_t cred_id_len, uint8_t *outk);
 extern bool credential_is_resident(const uint8_t *cred_id, size_t cred_id_len);
 extern int credential_load_resident(const file_t *ef, const uint8_t *rp_id_hash, Credential *cred);
+extern uint16_t credential_count_resident_for_rp(const uint8_t *rp_id_hash);
+extern int credential_reconcile_resident_store(void);
 
 #endif // _CREDENTIAL_H_

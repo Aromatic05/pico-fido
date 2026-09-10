@@ -161,8 +161,13 @@ int cbor_large_blobs(const uint8_t *data, size_t len) {
             if (expectedLength > 17 && memcmp(sha, temp_lba + expectedLength - 16, 16) != 0) {
                 CBOR_ERROR(CTAP2_ERR_INTEGRITY_FAILURE);
             }
-            file_put_data(ef_largeblob, temp_lba, (uint16_t)expectedLength);
+            if (file_put_data(ef_largeblob, temp_lba,
+                              (uint16_t)expectedLength) != PICOKEY_OK) {
+                reset_large_blob_state();
+                CBOR_ERROR(CTAP2_ERR_PROCESSING);
+            }
             low_flash_available();
+            reset_large_blob_state();
         }
         goto err;
     }
@@ -172,7 +177,10 @@ err:
     CBOR_FREE_BYTE_STRING(pinUvAuthParam);
     CBOR_FREE_BYTE_STRING(set);
     if (error != CborNoError) {
-        return -CTAP2_ERR_INVALID_CBOR;
+        if (error == CborErrorImproperValue) {
+            return CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
+        }
+        return error;
     }
     res_APDU_size = (uint16_t)cbor_encoder_get_buffer_size(&encoder, cbor_response + 1);
     return 0;

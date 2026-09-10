@@ -23,6 +23,7 @@
 #include "files.h"
 #include "apdu.h"
 #include "credential.h"
+#include "mbedtls/platform_util.h"
 
 uint8_t rp_counter = 1;
 uint8_t rp_total = 0;
@@ -182,7 +183,8 @@ int cbor_cred_mgmt(const uint8_t *data, size_t len) {
         uint8_t skip = 0;
         for (int i = 0; i < MAX_RESIDENT_CREDENTIALS; i++) {
             file_t *tef = search_dynamic_file((uint16_t)(EF_RP + i));
-            if (file_has_data(tef) && *file_get_data(tef) > 0) {
+            if (file_has_data(tef) && file_get_size(tef) >= 33 &&
+                credential_count_resident_for_rp(file_get_data(tef) + 1) > 0) {
                 if (++skip == rp_counter) {
                     if (rp_ef == NULL) {
                         rp_ef = tef;
@@ -383,30 +385,59 @@ int cbor_cred_mgmt(const uint8_t *data, size_t len) {
         for (int i = 0; i < MAX_RESIDENT_CREDENTIALS; i++) {
             file_t *ef = search_dynamic_file((uint16_t)(EF_CRED + i));
             if (file_has_data(ef) && memcmp(file_get_data(ef) + 32, credentialId.id.data, CRED_RESIDENT_LEN) == 0) {
-                uint8_t *rp_id_hash = file_get_data(ef);
-                if (delete_file(ef) != 0) {
-                    CBOR_ERROR(CTAP2_ERR_NOT_ALLOWED);
-                }
+                uint8_t rp_id_hash[32];
+                memcpy(rp_id_hash, file_get_data(ef), sizeof(rp_id_hash));
+                file_t *rp_ef = NULL;
                 for (int j = 0; j < MAX_RESIDENT_CREDENTIALS; j++) {
-                    file_t *rp_ef = search_dynamic_file((uint16_t)(EF_RP + j));
-                    if (file_has_data(rp_ef) && memcmp(file_get_data(rp_ef) + 1, rp_id_hash, 32) == 0) {
-                        uint8_t rp_data[MAX_MSG_SIZE + 33];
-                        if (file_get_size(rp_ef) > sizeof(rp_data)) {
-                            CBOR_ERROR(CTAP2_ERR_PROCESSING);
-                        }
-                        memcpy(rp_data, file_get_data(rp_ef), file_get_size(rp_ef));
-                        rp_data[0] -= 1;
-                        if (rp_data[0] == 0) {
-                            delete_file(rp_ef);
-                        }
-                        else {
-                            file_put_data(rp_ef, rp_data, file_get_size(rp_ef));
-                        }
+                    file_t *candidate = search_dynamic_file((uint16_t)(EF_RP + j));
+                    if (file_has_data(candidate) &&
+                        memcmp(file_get_data(candidate) + 1, rp_id_hash, 32) == 0) {
+                        rp_ef = candidate;
                         break;
                     }
                 }
+                if (rp_ef == NULL) {
+                    CBOR_ERROR(CTAP2_ERR_PROCESSING);
+                }
+
+                uint8_t rp_data[MAX_MSG_SIZE + 33];
+                uint16_t rp_len = file_get_size(rp_ef);
+                if (rp_len == 0 || rp_len > sizeof(rp_data) || file_get_data(rp_ef)[0] == 0) {
+                    CBOR_ERROR(CTAP2_ERR_PROCESSING);
+                }
+                memcpy(rp_data, file_get_data(rp_ef), rp_len);
+                uint8_t original_rp_count = rp_data[0];
+                uint16_t rp_fid = rp_ef->fid;
+                uint16_t total = credential_count_resident_for_rp(rp_id_hash);
+                if (total == 0) {
+                    mbedtls_platform_zeroize(rp_data, sizeof(rp_data));
+                    CBOR_ERROR(CTAP2_ERR_PROCESSING);
+                }
+                uint16_t remaining = total - 1;
+                int ret;
+                if (remaining == 0) {
+                    ret = flash_clear_file(rp_ef);
+                }
+                else {
+                    rp_data[0] = remaining > UINT8_MAX ? UINT8_MAX : (uint8_t)remaining;
+                    ret = file_put_data(rp_ef, rp_data, rp_len);
+                }
+                if (ret == PICOKEY_OK) {
+                    ret = flash_clear_file(ef);
+                }
+                if (ret != PICOKEY_OK) {
+                    rp_data[0] = original_rp_count;
+                    file_t *restore_rp = file_new(rp_fid);
+                    if (restore_rp != NULL &&
+                        file_put_data(restore_rp, rp_data, rp_len) == PICOKEY_OK) {
+                        low_flash_available();
+                    }
+                    mbedtls_platform_zeroize(rp_data, sizeof(rp_data));
+                    CBOR_ERROR(CTAP2_ERR_PROCESSING);
+                }
+                mbedtls_platform_zeroize(rp_data, sizeof(rp_data));
                 low_flash_available();
-                goto err; //no error
+                goto err; // no error
             }
         }
         CBOR_ERROR(CTAP2_ERR_NO_CREDENTIALS);
