@@ -24,10 +24,11 @@
 #include "credential.h"
 
 int cmd_authenticate() {
+    if (!fido_is_ready()) {
+        return SW_EXEC_ERROR();
+    }
     CTAP_AUTHENTICATE_REQ *req = (CTAP_AUTHENTICATE_REQ *) apdu.data;
     CTAP_AUTHENTICATE_RESP *resp = (CTAP_AUTHENTICATE_RESP *) res_APDU;
-    //if (scan_files_fido(true) != PICOKEY_OK)
-    //    return SW_EXEC_ERROR();
     if (apdu.nc < CTAP_CHAL_SIZE + CTAP_APPID_SIZE + 1 + 1) {
         return SW_WRONG_DATA();
     }
@@ -66,7 +67,11 @@ int cmd_authenticate() {
     }
     resp->flags = 0;
     resp->flags |= P1(apdu) == CTAP_AUTH_ENFORCE ? CTAP_AUTH_FLAG_TUP : 0x0;
-    uint32_t ctr = get_sign_counter();
+    uint32_t ctr = 0;
+    if (reserve_sign_counter(&ctr) != PICOKEY_OK) {
+        mbedtls_ecp_keypair_free(&key);
+        return SW_EXEC_ERROR();
+    }
     put_uint32_t_be(ctr, resp->ctr);
     uint8_t hash[32], sig_base[CTAP_APPID_SIZE + 1 + 4 + CTAP_CHAL_SIZE];
     memcpy(sig_base, req->appId, CTAP_APPID_SIZE);
@@ -86,8 +91,5 @@ int cmd_authenticate() {
     }
     res_APDU_size = 1 + 4 + (uint16_t)olen;
 
-    ctr++;
-    file_put_data(ef_counter, (uint8_t *) &ctr, sizeof(ctr));
-    low_flash_available();
     return SW_OK();
 }

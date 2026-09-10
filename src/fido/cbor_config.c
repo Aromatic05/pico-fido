@@ -31,8 +31,8 @@
 
 extern uint8_t keydev_dec[32];
 extern bool has_keydev_dec;
-extern void resetPersistentPinUvAuthToken();
-extern void resetPinUvAuthToken();
+extern int resetPersistentPinUvAuthTokenDeferred();
+extern int resetPinUvAuthTokenDeferred();
 
 int cbor_config(const uint8_t *data, size_t len) {
     CborParser parser;
@@ -159,10 +159,11 @@ int cbor_config(const uint8_t *data, size_t len) {
             if (has_keydev_dec == false) {
                 CBOR_ERROR(CTAP2_ERR_PIN_AUTH_INVALID);
             }
-            file_put_data(ef_keydev, keydev_dec, sizeof(keydev_dec));
+            if (fido_store_keydev_plain(keydev_dec, sizeof(keydev_dec)) != PICOKEY_OK) {
+                CBOR_ERROR(CTAP2_ERR_PROCESSING);
+            }
             mbedtls_platform_zeroize(keydev_dec, sizeof(keydev_dec));
-            file_put_data(ef_keydev_enc, NULL, 0); // Set ef to 0 bytes
-            low_flash_available();
+            has_keydev_dec = false;
         }
         else if (vendorCommandId == CTAP_CONFIG_AUT_ENABLE) {
             if (!file_has_data(ef_keydev)) {
@@ -172,9 +173,19 @@ int cbor_config(const uint8_t *data, size_t len) {
                 CBOR_ERROR(CTAP2_ERR_NOT_ALLOWED);
             }
 
+            if (vendorParamByteString.len != 48) {
+                CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
+            }
+            uint8_t keydev[32] = {0};
+            int ret = load_keydev(keydev);
+            if (ret != PICOKEY_OK) {
+                mbedtls_platform_zeroize(keydev, sizeof(keydev));
+                CBOR_ERROR(CTAP2_ERR_PROCESSING);
+            }
             mbedtls_chachapoly_context chatx;
-            int ret = mse_decrypt_ct(vendorParamByteString.data, vendorParamByteString.len);
+            ret = mse_decrypt_ct(vendorParamByteString.data, vendorParamByteString.len);
             if (ret != 0) {
+                mbedtls_platform_zeroize(keydev, sizeof(keydev));
                 CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
             }
 
@@ -182,17 +193,22 @@ int cbor_config(const uint8_t *data, size_t len) {
             random_gen(NULL, key_dev_enc, 12);
             mbedtls_chachapoly_init(&chatx);
             mbedtls_chachapoly_setkey(&chatx, vendorParamByteString.data);
-            ret = mbedtls_chachapoly_encrypt_and_tag(&chatx, file_get_size(ef_keydev), key_dev_enc, NULL, 0, file_get_data(ef_keydev), key_dev_enc + 12, key_dev_enc + 12 + file_get_size(ef_keydev));
+            ret = mbedtls_chachapoly_encrypt_and_tag(&chatx, sizeof(keydev), key_dev_enc,
+                                                     NULL, 0, keydev, key_dev_enc + 12,
+                                                     key_dev_enc + 12 + sizeof(keydev));
             mbedtls_chachapoly_free(&chatx);
+            mbedtls_platform_zeroize(keydev, sizeof(keydev));
             if (ret != 0) {
                 CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
             }
 
-            file_put_data(ef_keydev_enc, key_dev_enc, sizeof(key_dev_enc));
+            ret = fido_store_keydev_external(key_dev_enc, sizeof(key_dev_enc));
             mbedtls_platform_zeroize(key_dev_enc, sizeof(key_dev_enc));
-            file_put_data(ef_keydev, key_dev_enc, file_get_size(ef_keydev)); // Overwrite ef with 0
-            file_put_data(ef_keydev, NULL, 0); // Set ef to 0 bytes
-            low_flash_available();
+            if (ret != PICOKEY_OK) {
+                CBOR_ERROR(CTAP2_ERR_PROCESSING);
+            }
+            mbedtls_platform_zeroize(keydev_dec, sizeof(keydev_dec));
+            has_keydev_dec = false;
         }
 
 #ifndef ENABLE_EMULATION
@@ -218,23 +234,29 @@ int cbor_config(const uint8_t *data, size_t len) {
                 CBOR_ERROR(CTAP2_ERR_MISSING_PARAMETER);
             }
             file_t *ef_ee_ea = search_by_fid(EF_EE_DEV_EA, NULL, SPECIFY_EF);
-            if (ef_ee_ea) {
-                file_put_data(ef_ee_ea, vendorParamByteString.data, (uint16_t)vendorParamByteString.len);
+            if (ef_ee_ea == NULL || vendorParamByteString.len > UINT16_MAX ||
+                file_put_data(ef_ee_ea, vendorParamByteString.data,
+                              (uint16_t)vendorParamByteString.len) != PICOKEY_OK) {
+                CBOR_ERROR(CTAP2_ERR_PROCESSING);
             }
             low_flash_available();
         }
         else if (vendorCommandId == CTAP_CONFIG_PIN_POLICY) {
             file_t *ef_pin_policy = file_new(EF_PIN_COMPLEXITY_POLICY);
-            if (ef_pin_policy) {
-                if (vendorParamByteString.len > MAX_MSG_SIZE) {
-                    CBOR_ERROR(CTAP2_ERR_LIMIT_EXCEEDED);
-                }
-                uint8_t val[2 + MAX_MSG_SIZE] = {0};
-                // Not ready yet for integer param
-                // val[0] = (uint8_t)(vendorParamInt >> 8);
-                // val[1] = (uint8_t)(vendorParamInt & 0xFF);
-                memcpy(val + 2, vendorParamByteString.data, vendorParamByteString.len);
-                file_put_data(ef_pin_policy, val, 2 + (uint16_t)vendorParamByteString.len);
+            if (ef_pin_policy == NULL) {
+                CBOR_ERROR(CTAP2_ERR_KEY_STORE_FULL);
+            }
+            if (vendorParamByteString.len > MAX_MSG_SIZE) {
+                CBOR_ERROR(CTAP2_ERR_LIMIT_EXCEEDED);
+            }
+            uint8_t val[2 + MAX_MSG_SIZE] = {0};
+            // Not ready yet for integer param
+            // val[0] = (uint8_t)(vendorParamInt >> 8);
+            // val[1] = (uint8_t)(vendorParamInt & 0xFF);
+            memcpy(val + 2, vendorParamByteString.data, vendorParamByteString.len);
+            if (file_put_data(ef_pin_policy, val,
+                              2 + (uint16_t)vendorParamByteString.len) != PICOKEY_OK) {
+                CBOR_ERROR(CTAP2_ERR_PROCESSING);
             }
             low_flash_available();
         }
@@ -267,8 +289,10 @@ int cbor_config(const uint8_t *data, size_t len) {
             forceChangePin = ptrue;
         }
         if (forceChangePin) {
-            resetPersistentPinUvAuthToken();
-            resetPinUvAuthToken();
+            if (resetPersistentPinUvAuthTokenDeferred() != PICOKEY_OK ||
+                resetPinUvAuthTokenDeferred() != PICOKEY_OK) {
+                CBOR_ERROR(CTAP2_ERR_PROCESSING);
+            }
         }
         uint8_t dataf[2 + MAX_MINPIN_RPIDS * 32] = {0};
         dataf[0] = (uint8_t)newMinPinLength;
@@ -276,12 +300,17 @@ int cbor_config(const uint8_t *data, size_t len) {
         for (size_t m = 0; m < minPinLengthRPIDs_len; m++) {
             mbedtls_sha256((uint8_t *) minPinLengthRPIDs[m].data, minPinLengthRPIDs[m].len, dataf + 2 + m * 32, 0);
         }
-        file_put_data(ef_minpin, dataf, (uint16_t)(2 + minPinLengthRPIDs_len * 32));
+        if (file_put_data(ef_minpin, dataf,
+                          (uint16_t)(2 + minPinLengthRPIDs_len * 32)) != PICOKEY_OK) {
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
+        }
         low_flash_available();
         goto err; //No return
     }
     else if (subcommand == 0x01) {
-        set_opts(get_opts() | FIDO2_OPT_EA);
+        if (set_opts(get_opts() | FIDO2_OPT_EA) != PICOKEY_OK) {
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
+        }
         goto err;
     }
     else {

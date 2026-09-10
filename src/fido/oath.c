@@ -189,7 +189,9 @@ int cmd_put() {
     }
     file_t *ef = find_oath_cred(name.data, name.len);
     if (file_has_data(ef)) {
-        file_put_data(ef, apdu.data, (uint16_t)apdu.nc);
+        if (file_put_data(ef, apdu.data, (uint16_t)apdu.nc) != PICOKEY_OK) {
+            return SW_EXEC_ERROR();
+        }
         low_flash_available();
     }
     else {
@@ -197,7 +199,10 @@ int cmd_put() {
             file_t *tef = search_dynamic_file((uint16_t)(EF_OATH_CRED + i));
             if (!file_has_data(tef)) {
                 tef = file_new((uint16_t)(EF_OATH_CRED + i));
-                file_put_data(tef, apdu.data, (uint16_t)apdu.nc);
+                if (tef == NULL ||
+                    file_put_data(tef, apdu.data, (uint16_t)apdu.nc) != PICOKEY_OK) {
+                    return SW_EXEC_ERROR();
+                }
                 low_flash_available();
                 return SW_OK();
             }
@@ -278,7 +283,11 @@ int cmd_set_code() {
     }
     random_gen(NULL, oath_session()->challenge, sizeof(oath_session()->challenge));
     file_t *ef = file_new(EF_OATH_CODE);
-    file_put_data(ef, key.data, key.len);
+    if (ef == NULL || file_put_data(ef, key.data, key.len) != PICOKEY_OK) {
+        mbedtls_platform_zeroize(hmac, sizeof(hmac));
+        return SW_EXEC_ERROR();
+    }
+    mbedtls_platform_zeroize(hmac, sizeof(hmac));
     low_flash_available();
     oath_set_all_sessions_validated(false);
     return SW_OK();
@@ -458,7 +467,9 @@ int cmd_calculate() {
         asn1_ctx_init(tmp, (uint16_t)ef_size, &ctxt);
         asn1_find_tag(&ctxt, TAG_IMF, &chal);
         put_uint64_t_be(v, chal.data);
-        file_put_data(ef, tmp, (uint16_t)ef_size);
+        if (file_put_data(ef, tmp, (uint16_t)ef_size) != PICOKEY_OK) {
+            return SW_EXEC_ERROR();
+        }
         low_flash_available();
     }
     apdu.ne = res_APDU_size;
@@ -532,7 +543,11 @@ int cmd_set_otp_pin() {
     }
     hsh[0] = MAX_OTP_COUNTER;
     double_hash_pin(pw.data, pw.len, hsh + 1);
-    file_put_data(ef_otp_pin, hsh, sizeof(hsh));
+    if (file_put_data(ef_otp_pin, hsh, sizeof(hsh)) != PICOKEY_OK) {
+        mbedtls_platform_zeroize(hsh, sizeof(hsh));
+        return SW_EXEC_ERROR();
+    }
+    mbedtls_platform_zeroize(hsh, sizeof(hsh));
     low_flash_available();
     return SW_OK();
 }
@@ -557,7 +572,11 @@ int cmd_change_otp_pin() {
     }
     hsh[0] = MAX_OTP_COUNTER;
     double_hash_pin(new_pw.data, new_pw.len, hsh + 1);
-    file_put_data(ef_otp_pin, hsh, sizeof(hsh));
+    if (file_put_data(ef_otp_pin, hsh, sizeof(hsh)) != PICOKEY_OK) {
+        mbedtls_platform_zeroize(hsh, sizeof(hsh));
+        return SW_EXEC_ERROR();
+    }
+    mbedtls_platform_zeroize(hsh, sizeof(hsh));
     low_flash_available();
     return SW_OK();
 }
@@ -579,13 +598,19 @@ int cmd_verify_otp_pin() {
         if (data_hsh[0] > 0) {
             data_hsh[0] -= 1;
         }
-        file_put_data(ef_otp_pin, data_hsh, sizeof(data_hsh));
+        if (file_put_data(ef_otp_pin, data_hsh, sizeof(data_hsh)) != PICOKEY_OK) {
+            mbedtls_platform_zeroize(data_hsh, sizeof(data_hsh));
+            return SW_EXEC_ERROR();
+        }
         low_flash_available();
         oath_session()->validated = false;
         return SW_SECURITY_STATUS_NOT_SATISFIED();
     }
     data_hsh[0] = MAX_OTP_COUNTER;
-    file_put_data(ef_otp_pin, data_hsh, sizeof(data_hsh));
+    if (file_put_data(ef_otp_pin, data_hsh, sizeof(data_hsh)) != PICOKEY_OK) {
+        mbedtls_platform_zeroize(data_hsh, sizeof(data_hsh));
+        return SW_EXEC_ERROR();
+    }
     low_flash_available();
     oath_session()->validated = true;
     return SW_OK();
@@ -677,7 +702,9 @@ int cmd_rename() {
     *(new_data + (name.data - fdata) - 1) = new_name.len;
     memcpy(new_data + (name.data - fdata), new_name.data, new_name.len);
     memcpy(new_data + (name.data - fdata) + new_name.len, name.data + name.len, fsize - (name.data + name.len - fdata));
-    file_put_data(ef, new_data, (uint16_t)new_size);
+    if (file_put_data(ef, new_data, (uint16_t)new_size) != PICOKEY_OK) {
+        return SW_EXEC_ERROR();
+    }
     low_flash_available();
     return SW_OK();
 }

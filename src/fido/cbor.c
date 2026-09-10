@@ -86,6 +86,9 @@ int cbor_parse(uint8_t cmd, const uint8_t *data, size_t len) {
             if (data[0] != CTAP_GET_NEXT_ASSERTION) {
                 reset_gna_state();
             }
+            if (!fido_is_ready() && data[0] != CTAP_GET_INFO && data[0] != CTAP_RESET) {
+                return CTAP2_ERR_PROCESSING;
+            }
             if (data[0] == CTAP_MAKE_CREDENTIAL) {
                 return cbor_make_credential(data + 1, len - 1);
             }

@@ -37,7 +37,7 @@ static const uint8_t yubikey_man_aid[] = {
     7,
     0xd2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01
 };
-extern void scan_all();
+extern int scan_all();
 extern void init_otp();
 int man_select(app_t *a, uint8_t force) {
     a->process_apdu = man_process_apdu;
@@ -46,7 +46,10 @@ int man_select(app_t *a, uint8_t force) {
     res_APDU_size = (uint16_t)strlen((char *) res_APDU);
     apdu.ne = res_APDU_size;
     if (force) {
-        scan_all();
+        /* Management remains a recovery surface even when FIDO-owned default
+         * records cannot be initialized. scan_all() still refreshes the
+         * shared file table before its FIDO-specific checks fail. */
+        (void)scan_all();
 #if ENABLE_OTP_APP
         init_otp();
 #endif
