@@ -313,6 +313,14 @@ int cbor_config(const uint8_t *data, size_t len) {
         }
         goto err;
     }
+    else if (subcommand == 0x02) { // toggleAlwaysUv
+        /* Persist only the Always UV policy bit; the ACFG token has
+         * already been verified and checked above. */
+        if (set_opts(get_opts() ^ FIDO2_OPT_AUV) != PICOKEY_OK) {
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
+        }
+        goto err;
+    }
     else {
         CBOR_ERROR(CTAP2_ERR_UNSUPPORTED_OPTION);
     }
