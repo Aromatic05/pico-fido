@@ -318,7 +318,9 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
         //else if (options.up == NULL) //5.7
         //rup = ptrue;
     }
-    if (pinUvAuthParam.present == false && options.uv == pfalse && file_has_data(ef_pin)) { //8.1
+    if (pinUvAuthParam.present == false &&
+        ((get_opts() & FIDO2_OPT_AUV) ||
+         (options.uv == pfalse && file_has_data(ef_pin)))) { //8.1
         CBOR_ERROR(CTAP2_ERR_PUAT_REQUIRED);
     }
     if (enterpriseAttestation > 0) {

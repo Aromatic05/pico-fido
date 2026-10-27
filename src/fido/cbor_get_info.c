@@ -71,7 +71,10 @@ int cbor_get_info() {
     CBOR_CHECK(cbor_encode_text_stringz(&arrayEncoder, "rk"));
     CBOR_CHECK(cbor_encode_boolean(&arrayEncoder, true));
     CBOR_CHECK(cbor_encode_text_stringz(&arrayEncoder, "alwaysUv"));
-    if (file_has_data(ef_pin) && (get_opts() & FIDO2_OPT_AUV || !getUserVerifiedFlagValue())) {
+    /* alwaysUv is a persistent authenticator configuration option, not the
+     * inverse of this session's transient user-verified flag. A PIN token
+     * must never change what getInfo reports as the device policy. */
+    if (file_has_data(ef_pin) && (get_opts() & FIDO2_OPT_AUV)) {
         CBOR_CHECK(cbor_encode_boolean(&arrayEncoder, true));
     }
     else {

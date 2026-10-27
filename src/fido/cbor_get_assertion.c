@@ -265,6 +265,11 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
                 up = true;
             }
         }
+        /* With alwaysUv enabled, a bare user-presence gesture cannot
+         * authorize an assertion: require a verified PIN/UV token. */
+        if ((get_opts() & FIDO2_OPT_AUV) && !pinUvAuthParam.present) {
+            CBOR_ERROR(CTAP2_ERR_PUAT_REQUIRED);
+        }
 
         if (pinUvAuthParam.present == true) { //6.1
             int ret = verify((uint8_t)pinUvAuthProtocol, paut.data, clientDataHash.data, (uint16_t)clientDataHash.len, pinUvAuthParam.data);
