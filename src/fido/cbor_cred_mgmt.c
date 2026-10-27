@@ -25,10 +25,10 @@
 #include "credential.h"
 #include "mbedtls/platform_util.h"
 
-uint8_t rp_counter = 1;
-uint8_t rp_total = 0;
-uint8_t cred_counter = 1;
-uint8_t cred_total = 0;
+uint16_t rp_counter = 1;
+uint16_t rp_total = 0;
+uint16_t cred_counter = 1;
+uint16_t cred_total = 0;
 CborByteString rpIdHashx = { 0 };
 
 void reset_cred_mgmt_state() {
@@ -144,7 +144,7 @@ int cbor_cred_mgmt(const uint8_t *data, size_t len) {
                 CBOR_ERROR(CTAP2_ERR_PIN_AUTH_INVALID);
             }
         }
-        uint8_t existing = 0;
+        uint16_t existing = 0;
         for (int i = 0; i < MAX_RESIDENT_CREDENTIALS; i++) {
             if (file_has_data(search_dynamic_file((uint16_t)(EF_CRED + i)))) {
                 existing++;
@@ -180,7 +180,7 @@ int cbor_cred_mgmt(const uint8_t *data, size_t len) {
                 CBOR_ERROR(CTAP2_ERR_NOT_ALLOWED);
             }
         }
-        uint8_t skip = 0;
+        uint16_t skip = 0;
         for (int i = 0; i < MAX_RESIDENT_CREDENTIALS; i++) {
             file_t *tef = search_dynamic_file((uint16_t)(EF_RP + i));
             if (file_has_data(tef) && file_get_size(tef) >= 33 &&
@@ -247,7 +247,7 @@ int cbor_cred_mgmt(const uint8_t *data, size_t len) {
             rpIdHash = rpIdHashx;
         }
         file_t *cred_ef = NULL;
-        uint8_t skip = 0;
+        uint16_t skip = 0;
         for (int i = 0; i < MAX_RESIDENT_CREDENTIALS; i++) {
             file_t *tef = search_dynamic_file((uint16_t)(EF_CRED + i));
             if (file_has_data(tef) && memcmp(file_get_data(tef), rpIdHash.data, 32) == 0) {
