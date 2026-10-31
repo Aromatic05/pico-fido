@@ -38,6 +38,9 @@ int cmd_authenticate() {
     if (apdu.nc != CTAP_CHAL_SIZE + CTAP_APPID_SIZE + 1 + req->keyHandleLen) {
         return SW_WRONG_LENGTH();
     }
+    if (P1(apdu) != CTAP_AUTH_ENFORCE && P1(apdu) != CTAP_AUTH_CHECK_ONLY) {
+        return SW_INCORRECT_P1P2();
+    }
     if (P1(apdu) == CTAP_AUTH_ENFORCE && wait_button_pressed() == true) {
         return SW_CONDITIONS_NOT_SATISFIED();
     }

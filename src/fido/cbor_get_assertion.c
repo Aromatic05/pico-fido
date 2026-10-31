@@ -126,6 +126,9 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
         else if (val_u == 0x03) { // excludeList
             CBOR_PARSE_ARRAY_START(_f1, 2)
             {
+                if (allowList_len >= MAX_CREDENTIAL_COUNT_IN_LIST) {
+                    CBOR_ERROR(CTAP2_ERR_LIMIT_EXCEEDED);
+                }
                 PublicKeyCredentialDescriptor *pc = &allowList[allowList_len];
                 CBOR_PARSE_MAP_START(_f2, 3)
                 {
@@ -135,6 +138,9 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
                     if (strcmp(_fd3, "transports") == 0) {
                         CBOR_PARSE_ARRAY_START(_f3, 4)
                         {
+                            if (pc->transports_len >= MAX_CREDENTIAL_TRANSPORTS) {
+                                CBOR_ERROR(CTAP2_ERR_LIMIT_EXCEEDED);
+                            }
                             CBOR_FIELD_GET_TEXT(pc->transports[pc->transports_len], 4);
                             pc->transports_len++;
                         }
@@ -272,7 +278,8 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
         }
 
         if (pinUvAuthParam.present == true) { //6.1
-            int ret = verify((uint8_t)pinUvAuthProtocol, paut.data, clientDataHash.data, (uint16_t)clientDataHash.len, pinUvAuthParam.data);
+            int ret = verify((uint8_t)pinUvAuthProtocol, paut.data, clientDataHash.data, clientDataHash.len,
+                             pinUvAuthParam.data, pinUvAuthParam.len);
             if (ret != CborNoError) {
                 CBOR_ERROR(CTAP2_ERR_PIN_AUTH_INVALID);
             }
@@ -303,13 +310,22 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
 
         if (allowList_len > 0) {
             for (size_t e = 0; e < allowList_len; e++) {
+                if (creds_len >= MAX_CREDENTIAL_COUNT_IN_LIST) {
+                    break;
+                }
                 if (allowList[e].type.present == false || allowList[e].id.present == false) {
                     CBOR_ERROR(CTAP2_ERR_MISSING_PARAMETER);
                 }
                 if (strcmp(allowList[e].type.data, "public-key") != 0) {
                     continue;
                 }
+                if (allowList[e].id.len > MAX_CRED_ID_LENGTH) {
+                    CBOR_ERROR(CTAP1_ERR_INVALID_LEN);
+                }
                 if (credential_is_resident(allowList[e].id.data, allowList[e].id.len)) {
+                    if (allowList[e].id.len != CRED_RESIDENT_LEN) {
+                        CBOR_ERROR(CTAP1_ERR_INVALID_LEN);
+                    }
                     for (int i = 0; i < MAX_RESIDENT_CREDENTIALS && creds_len < MAX_CREDENTIAL_COUNT_IN_LIST; i++) {
                         file_t *ef = search_dynamic_file((uint16_t)(EF_CRED + i));
                         if (!file_has_data(ef) || memcmp(file_get_data(ef), rp_id_hash, 32) != 0) {
@@ -342,7 +358,8 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
                                 if (!file_has_data(ef) || memcmp(file_get_data(ef), rp_id_hash, 32) != 0) {
                                     continue;
                                 }
-                                if (memcmp(file_get_data(ef) + 32, allowList[e].id.data, allowList[e].id.len) == 0) {
+                                if (file_get_size(ef) >= 32 + allowList[e].id.len &&
+                                    memcmp(file_get_data(ef) + 32, allowList[e].id.data, allowList[e].id.len) == 0) {
                                     resident = true;
                                     break;
                                 }
@@ -411,7 +428,13 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
                     if (strcmp(allowList[e].type.data, "public-key") != 0) {
                         continue;
                     }
+                    if (allowList[e].id.len > MAX_CRED_ID_LENGTH) {
+                        CBOR_ERROR(CTAP1_ERR_INVALID_LEN);
+                    }
                     if (credential_is_resident(allowList[e].id.data, allowList[e].id.len)) {
+                        if (allowList[e].id.len != CRED_RESIDENT_LEN) {
+                            CBOR_ERROR(CTAP1_ERR_INVALID_LEN);
+                        }
                         for (int i = 0; i < MAX_RESIDENT_CREDENTIALS && creds_len < MAX_CREDENTIAL_COUNT_IN_LIST; i++) {
                             file_t *ef = search_dynamic_file((uint16_t)(EF_CRED + i));
                             if (!file_has_data(ef) || memcmp(file_get_data(ef), rp_id_hash, 32) != 0) {
@@ -572,12 +595,14 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
                     mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
                     CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
                 }
-                if (verify((uint8_t)hmacSecretPinUvAuthProtocol, sharedSecret, salt_enc.data, (uint16_t)salt_enc.len, salt_auth.data) != 0) {
+                if (verify((uint8_t)hmacSecretPinUvAuthProtocol, sharedSecret, salt_enc.data, salt_enc.len,
+                           salt_auth.data, salt_auth.len) != 0) {
                     mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
                     CBOR_ERROR(CTAP2_ERR_EXTENSION_FIRST);
                 }
                 uint8_t salt_dec[64] = {0}, poff = ((uint8_t)hmacSecretPinUvAuthProtocol - 1) * IV_SIZE;
-                ret = decrypt((uint8_t)hmacSecretPinUvAuthProtocol, sharedSecret, salt_enc.data, (uint16_t)salt_enc.len, salt_dec);
+                ret = decrypt((uint8_t)hmacSecretPinUvAuthProtocol, sharedSecret, salt_enc.data, salt_enc.len,
+                              salt_dec, sizeof(salt_dec));
                 if (ret != 0) {
                     mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
                     CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
@@ -772,7 +797,7 @@ err:
     for (size_t m = 0; m < MAX_CREDENTIAL_COUNT_IN_LIST; m++) {
         CBOR_FREE_BYTE_STRING(allowList[m].type);
         CBOR_FREE_BYTE_STRING(allowList[m].id);
-        for (size_t n = 0; n < 8; n++) {
+        for (size_t n = 0; n < MAX_CREDENTIAL_TRANSPORTS; n++) {
             CBOR_FREE_BYTE_STRING(allowList[m].transports[n]);
         }
     }

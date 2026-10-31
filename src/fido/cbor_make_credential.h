@@ -40,10 +40,12 @@ typedef struct PublicKeyCredentialParameters {
     int64_t alg;
 } PublicKeyCredentialParameters;
 
+#define MAX_CREDENTIAL_TRANSPORTS 8
+
 typedef struct PublicKeyCredentialDescriptor {
     CborCharString type;
     CborByteString id;
-    CborCharString transports[8];
+    CborCharString transports[MAX_CREDENTIAL_TRANSPORTS];
     size_t transports_len;
 } PublicKeyCredentialDescriptor;
 

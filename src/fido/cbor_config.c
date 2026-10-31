@@ -135,8 +135,14 @@ int cbor_config(const uint8_t *data, size_t len) {
     memset(verify_payload, 0xff, 32);
     verify_payload[32] = 0x0d;
     verify_payload[33] = (uint8_t)subcommand;
-    memcpy(verify_payload + 34, raw_subpara, raw_subpara_len);
-    error = verify((uint8_t)pinUvAuthProtocol, paut.data, verify_payload, (uint16_t)(32 + 1 + 1 + raw_subpara_len), pinUvAuthParam.data);
+    if (raw_subpara_len > 0) {
+        if (raw_subpara == NULL) {
+            CBOR_ERROR(CTAP2_ERR_INVALID_CBOR);
+        }
+        memcpy(verify_payload + 34, raw_subpara, raw_subpara_len);
+    }
+    error = verify((uint8_t)pinUvAuthProtocol, paut.data, verify_payload, 32 + 1 + 1 + raw_subpara_len,
+                   pinUvAuthParam.data, pinUvAuthParam.len);
     if (error != CborNoError) {
         CBOR_ERROR(CTAP2_ERR_PIN_AUTH_INVALID);
     }

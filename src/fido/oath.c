@@ -24,6 +24,7 @@
 #include "asn1.h"
 #include "crypto_utils.h"
 #include "management.h"
+#include "mbedtls/constant_time.h"
 extern bool is_nk;
 
 #define MAX_OATH_CRED   255
@@ -269,8 +270,14 @@ int cmd_set_code() {
         return SW_INCORRECT_PARAMS();
     }
 
+    if (key.len < 2) {
+        return SW_INCORRECT_PARAMS();
+    }
     const mbedtls_md_info_t *md_info = get_oath_md_info(key.data[0]);
     if (md_info == NULL) {
+        return SW_INCORRECT_PARAMS();
+    }
+    if (key.len < 2 || chal.len == 0 || resp.len != mbedtls_md_get_size(md_info)) {
         return SW_INCORRECT_PARAMS();
     }
     uint8_t hmac[64];
@@ -278,7 +285,7 @@ int cmd_set_code() {
     if (r != 0) {
         return SW_EXEC_ERROR();
     }
-    if (memcmp(hmac, resp.data, resp.len) != 0) {
+    if (mbedtls_ct_memcmp(hmac, resp.data, resp.len) != 0) {
         return SW_DATA_INVALID();
     }
     random_gen(NULL, oath_session()->challenge, sizeof(oath_session()->challenge));
@@ -296,6 +303,9 @@ int cmd_set_code() {
 int cmd_reset() {
     if (P1(apdu) != 0xde || P2(apdu) != 0xad) {
         return SW_INCORRECT_P1P2();
+    }
+    if (wait_button_pressed()) {
+        return SW_CONDITIONS_NOT_SATISFIED();
     }
     for (int i = 0; i < MAX_OATH_CRED; i++) {
         file_t *ef = search_dynamic_file((uint16_t)(EF_OATH_CRED + i));
@@ -325,7 +335,12 @@ int cmd_list() {
         if (file_has_data(ef)) {
             asn1_ctx_t ctxi, key = { 0 }, name = { 0 }, pws = { 0 };
             asn1_ctx_init(file_get_data(ef), file_get_size(ef), &ctxi);
-            if (asn1_find_tag(&ctxi, TAG_NAME, &name) == true && asn1_find_tag(&ctxi, TAG_KEY, &key) == true) {
+            if (asn1_find_tag(&ctxi, TAG_NAME, &name) == true &&
+                asn1_find_tag(&ctxi, TAG_KEY, &key) == true && key.len >= 1) {
+                if (name.len + 1 + (ext ? 1 : 0) > UINT8_MAX ||
+                    (size_t)res_APDU_size + 3 + name.len + (ext ? 1 : 0) > APDU_RESPONSE_BUFFER_SIZE) {
+                    return SW_WRONG_LENGTH();
+                }
                 res_APDU[res_APDU_size++] = TAG_NAME_LIST;
                 res_APDU[res_APDU_size++] = (uint8_t)(name.len + 1 + (ext ? 1 : 0));
                 res_APDU[res_APDU_size++] = key.data[0];
@@ -363,8 +378,14 @@ int cmd_validate() {
     }
     key.data = file_get_data(ef);
     key.len = file_get_size(ef);
+    if (key.len < 2) {
+        return SW_INCORRECT_PARAMS();
+    }
     const mbedtls_md_info_t *md_info = get_oath_md_info(key.data[0]);
     if (md_info == NULL) {
+        return SW_INCORRECT_PARAMS();
+    }
+    if (key.len < 2 || chal.len == 0 || resp.len != mbedtls_md_get_size(md_info)) {
         return SW_INCORRECT_PARAMS();
     }
     uint8_t hmac[64];
@@ -372,7 +393,7 @@ int cmd_validate() {
     if (ret != 0) {
         return SW_EXEC_ERROR();
     }
-    if (memcmp(hmac, resp.data, resp.len) != 0) {
+    if (mbedtls_ct_memcmp(hmac, resp.data, resp.len) != 0) {
         return SW_DATA_INVALID();
     }
     ret = mbedtls_md_hmac(md_info, key.data + 1, key.len - 1, chal.data, chal.len, hmac);
@@ -424,7 +445,7 @@ int cmd_calculate() {
     if (oath_session()->validated == false) {
         return SW_SECURITY_STATUS_NOT_SATISFIED();
     }
-    asn1_ctx_t ctxi, key = { 0 }, chal = { 0 }, name = { 0 };
+    asn1_ctx_t ctxi, key = { 0 }, chal = { 0 }, name = { 0 }, prop = { 0 };
     asn1_ctx_init(apdu.data, (uint16_t)apdu.nc, &ctxi);
     if (asn1_find_tag(&ctxi, TAG_CHALLENGE, &chal) == false) {
         return SW_INCORRECT_PARAMS();
@@ -440,6 +461,10 @@ int cmd_calculate() {
     asn1_ctx_init(file_get_data(ef), file_get_size(ef), &ctxe);
     if (asn1_find_tag(&ctxe, TAG_KEY, &key) == false) {
         return SW_INCORRECT_PARAMS();
+    }
+    if (asn1_find_tag(&ctxe, TAG_PROPERTY, &prop) && prop.len > 0 &&
+        (prop.data[0] & PROP_TOUCH) && wait_button_pressed()) {
+        return SW_CONDITIONS_NOT_SATISFIED();
     }
 
     if ((key.data[0] & OATH_TYPE_MASK) == OATH_TYPE_HOTP) {
@@ -496,8 +521,13 @@ int cmd_calculate_all() {
             size_t ef_len = file_get_size(ef);
             asn1_ctx_t ctxe;
             asn1_ctx_init((uint8_t *)ef_data, (uint16_t)ef_len, &ctxe);
-            if (asn1_find_tag(&ctxe, TAG_NAME, &name) == false || asn1_find_tag(&ctxe, TAG_KEY, &key) == false) {
+            if (asn1_find_tag(&ctxe, TAG_NAME, &name) == false ||
+                asn1_find_tag(&ctxe, TAG_KEY, &key) == false || key.len < 2) {
                 continue;
+            }
+            if (name.len > UINT8_MAX ||
+                (size_t)res_APDU_size + 2 + name.len + 1 + 2 + 64 > APDU_RESPONSE_BUFFER_SIZE) {
+                return SW_WRONG_LENGTH();
             }
             res_APDU[res_APDU_size++] = TAG_NAME;
             res_APDU[res_APDU_size++] = (uint8_t)name.len;
@@ -541,6 +571,9 @@ int cmd_set_otp_pin() {
     if (asn1_find_tag(&ctxi, TAG_PASSWORD, &pw) == false) {
         return SW_INCORRECT_PARAMS();
     }
+    if (pw.len == 0) {
+        return SW_WRONG_LENGTH();
+    }
     hsh[0] = MAX_OTP_COUNTER;
     double_hash_pin(pw.data, pw.len, hsh + 1);
     if (file_put_data(ef_otp_pin, hsh, sizeof(hsh)) != PICOKEY_OK) {
@@ -563,12 +596,18 @@ int cmd_change_otp_pin() {
     if (asn1_find_tag(&ctxi, TAG_PASSWORD,  &pw) == false) {
         return SW_INCORRECT_PARAMS();
     }
+    if (pw.len == 0) {
+        return SW_WRONG_LENGTH();
+    }
     double_hash_pin(pw.data, pw.len, hsh + 1);
     if (memcmp(file_get_data(ef_otp_pin) + 1, hsh + 1, 32) != 0) {
         return SW_SECURITY_STATUS_NOT_SATISFIED();
     }
     if (asn1_find_tag(&ctxi, TAG_NEW_PASSWORD, &new_pw) == false) {
         return SW_INCORRECT_PARAMS();
+    }
+    if (new_pw.len == 0) {
+        return SW_WRONG_LENGTH();
     }
     hsh[0] = MAX_OTP_COUNTER;
     double_hash_pin(new_pw.data, new_pw.len, hsh + 1);
@@ -591,6 +630,9 @@ int cmd_verify_otp_pin() {
     asn1_ctx_init(apdu.data, (uint16_t)apdu.nc, &ctxi);
     if (asn1_find_tag(&ctxi, TAG_PASSWORD, &pw) == false) {
         return SW_INCORRECT_PARAMS();
+    }
+    if (pw.len == 0) {
+        return SW_WRONG_LENGTH();
     }
     double_hash_pin(pw.data, pw.len, hsh + 1);
     memcpy(data_hsh, file_get_data(ef_otp_pin), sizeof(data_hsh));
@@ -710,6 +752,9 @@ int cmd_rename() {
 }
 
 int cmd_get_credential() {
+    if (!oath_session()->validated) {
+        return SW_SECURITY_STATUS_NOT_SATISFIED();
+    }
     asn1_ctx_t ctxi, name = { 0 };
     if (apdu.nc < 3) {
         return SW_INCORRECT_PARAMS();
@@ -726,6 +771,9 @@ int cmd_get_credential() {
         return SW_DATA_INVALID();
     }
     asn1_ctx_t login = { 0 }, pw = { 0 }, meta = { 0 }, prop = { 0 };
+    if ((size_t)res_APDU_size + file_get_size(ef) > APDU_RESPONSE_BUFFER_SIZE) {
+        return SW_WRONG_LENGTH();
+    }
     asn1_ctx_init(file_get_data(ef), file_get_size(ef), &ctxi);
     if (asn1_find_tag(&ctxi, TAG_NAME, &name) == true) {
         res_APDU[res_APDU_size++] = TAG_NAME;

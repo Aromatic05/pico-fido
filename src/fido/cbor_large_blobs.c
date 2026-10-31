@@ -141,7 +141,8 @@ int cbor_large_blobs(const uint8_t *data, size_t len) {
         verify_data[32] = 0x0C;
         put_uint32_t_le((uint32_t)offset, verify_data + 34);
         mbedtls_sha256(set.data, set.len, verify_data + 38, 0);
-        if (verify((uint8_t)pinUvAuthProtocol, paut.data, verify_data, (uint16_t)sizeof(verify_data), pinUvAuthParam.data) != 0) {
+        if (verify((uint8_t)pinUvAuthProtocol, paut.data, verify_data, sizeof(verify_data),
+                   pinUvAuthParam.data, pinUvAuthParam.len) != 0) {
             CBOR_ERROR(CTAP2_ERR_PIN_AUTH_INVALID);
         }
         if (!(paut.permissions & CTAP_PERMISSION_LBW)) {

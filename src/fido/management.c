@@ -448,6 +448,9 @@ uint16_t man_write_config_maintenance(const uint8_t *request, uint16_t request_l
 }
 
 int cmd_factory_reset() {
+    if (wait_button_pressed()) {
+        return SW_CONDITIONS_NOT_SATISFIED();
+    }
     return reset_device_storage() == PICOKEY_OK ? SW_OK() : SW_EXEC_ERROR();
 }
 
