@@ -71,7 +71,7 @@ void clearUserVerifiedFlag() {
 
 void clearPinUvAuthTokenPermissionsExceptLbw() {
     if (paut.in_use == true) {
-        paut.permissions = CTAP_PERMISSION_LBW;
+        paut.permissions &= CTAP_PERMISSION_LBW;
     }
 }
 
