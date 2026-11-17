@@ -733,6 +733,9 @@ int cmd_rename() {
     if (oath_session()->validated == false) {
         return SW_SECURITY_STATUS_NOT_SATISFIED();
     }
+    if (apdu.nc == 0) {
+        return SW_WRONG_LENGTH();
+    }
     if (apdu.data[0] != TAG_NAME) {
         return SW_WRONG_DATA();
     }

@@ -493,6 +493,9 @@ int cmd_otp() {
         return otp_config_commit_status(_is_otp);
     }
     else if (p1 == 0x04 || p1 == 0x05) { // Update slot
+        if (apdu.nc < otp_config_size) {
+            return SW_WRONG_LENGTH();
+        }
         otp_config_t *odata = (otp_config_t *) apdu.data;
         if (p1 == 0x05 && p2 != 0x0) {
             return SW_INCORRECT_P1P2();
