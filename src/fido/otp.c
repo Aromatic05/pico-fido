@@ -232,6 +232,9 @@ int otp_button_pressed(uint8_t slot) {
     if (file_has_data(ef) == false) {
         return 1;
     }
+    if (otp_config->ext_flags & DORMANT) {
+        return 1;
+    }
     if (otp_config->cfg_flags & CHAL_YUBICO && otp_config->tkt_flags & CHAL_RESP) {
         return 2;
     }
@@ -459,6 +462,22 @@ bool check_crc(const otp_config_t *data) {
 }
 
 bool _is_otp = false;
+
+static bool otp_slot2_write_blocked(uint16_t slot) {
+    if (slot != EF_OTP_SLOT2) {
+        return false;
+    }
+    file_t *first = search_dynamic_file(EF_OTP_SLOT1);
+    file_t *second = search_dynamic_file(EF_OTP_SLOT2);
+    if (!file_has_data(first)) {
+        return false;
+    }
+    const otp_config_t *config1 = (const otp_config_t *)file_get_data(first);
+    const otp_config_t *config2 = (const otp_config_t *)file_get_data(second);
+    return (config1->tkt_flags & PROTECT_CFG2) &&
+           (!file_has_data(second) || !(config2->tkt_flags & PROTECT_CFG2));
+}
+
 int cmd_otp() {
     uint8_t p1 = P1(apdu), p2 = P2(apdu);
     if (p1 == 0x01 || p1 == 0x03) { // Configure slot
@@ -467,6 +486,9 @@ int cmd_otp() {
             return SW_INCORRECT_P1P2();
         }
         uint16_t slot = (p1 == 0x01 ? EF_OTP_SLOT1 : EF_OTP_SLOT2) + p2;
+        if (otp_slot2_write_blocked(slot)) {
+            return SW_SECURITY_STATUS_NOT_SATISFIED();
+        }
         file_t *ef = file_new(slot);
         if (file_has_data(ef)) {
             otp_config_t *otpc = (otp_config_t *) file_get_data(ef);
@@ -502,6 +524,9 @@ int cmd_otp() {
             return SW_INCORRECT_P1P2();
         }
         uint16_t slot = (p1 == 0x04 ? EF_OTP_SLOT1 : EF_OTP_SLOT2) + p2;
+        if (otp_slot2_write_blocked(slot)) {
+            return SW_SECURITY_STATUS_NOT_SATISFIED();
+        }
         if (odata->rfu[0] != 0 || odata->rfu[1] != 0 || check_crc(odata) == false) {
             return SW_WRONG_DATA();
         }
@@ -511,6 +536,9 @@ int cmd_otp() {
                 return SW_WRONG_LENGTH();
             }
             otp_config_t *otpc = (otp_config_t *) file_get_data(ef);
+            if (!(otpc->ext_flags & ALLOW_UPDATE)) {
+                return SW_CONDITIONS_NOT_SATISFIED();
+            }
             if (memcmp(otpc->acc_code, apdu.data + otp_config_size, ACC_CODE_SIZE) != 0) {
                 return SW_SECURITY_STATUS_NOT_SATISFIED();
             }
@@ -541,6 +569,9 @@ int cmd_otp() {
     else if (p1 == 0x06) { // Swap slots
         if (p2 != 0 || apdu.nc != 0) {
             return SW_INCORRECT_P1P2();
+        }
+        if (otp_slot2_write_blocked(EF_OTP_SLOT2)) {
+            return SW_SECURITY_STATUS_NOT_SATISFIED();
         }
         file_t *ef1 = search_dynamic_file(EF_OTP_SLOT1);
         file_t *ef2 = search_dynamic_file(EF_OTP_SLOT2);
@@ -617,6 +648,9 @@ int cmd_otp() {
         file_t *ef = search_dynamic_file(slot);
         if (file_has_data(ef)) {
             otp_config_t *otp_config = (otp_config_t *) file_get_data(ef);
+            if (otp_config->ext_flags & DORMANT) {
+                return SW_CONDITIONS_NOT_SATISFIED();
+            }
             if (!(otp_config->tkt_flags & CHAL_RESP)) {
                 return SW_WRONG_DATA();
             }
