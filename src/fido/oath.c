@@ -173,6 +173,9 @@ int cmd_put() {
     if (asn1_find_tag(&ctxi, TAG_NAME, &name) == false) {
         return SW_INCORRECT_PARAMS();
     }
+    if (key.len < 2) {
+        return SW_WRONG_DATA();
+    }
     if ((key.data[0] & OATH_TYPE_MASK) == OATH_TYPE_HOTP) {
         if (asn1_find_tag(&ctxi, TAG_IMF, &imf) == false) {
             memcpy(apdu.data + apdu.nc, "\x7a\x08\x00\x00\x00\x00\x00\x00\x00\x00", 10);
@@ -410,6 +413,9 @@ int cmd_validate() {
 }
 
 int calculate_oath(uint8_t truncate, const uint8_t *key, size_t key_len, const uint8_t *chal, size_t chal_len) {
+    if (key == NULL || key_len < 2) {
+        return SW_WRONG_DATA();
+    }
     const mbedtls_md_info_t *md_info = get_oath_md_info(key[0]);
     if (md_info == NULL) {
         return SW_INCORRECT_PARAMS();
