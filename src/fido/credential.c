@@ -33,6 +33,7 @@ extern bool has_set_rtc();
 int credential_derive_chacha_key(uint8_t *outk, const uint8_t *);
 
 static int credential_silent_tag(const uint8_t *cred_id, size_t cred_id_len, const uint8_t *rp_id_hash, uint8_t *outk) {
+    uint8_t hmac_key[32], tag[32];
     mbedtls_sha256_context ctx;
     mbedtls_sha256_init(&ctx);
     mbedtls_sha256_starts(&ctx, 0);
@@ -43,10 +44,16 @@ static int credential_silent_tag(const uint8_t *cred_id, size_t cred_id_len, con
         mbedtls_sha256_update(&ctx, pico_serial.id, sizeof(pico_serial.id));
     }
     mbedtls_sha256_update(&ctx, rp_id_hash, 32);
-    mbedtls_sha256_finish(&ctx, outk);
+    mbedtls_sha256_finish(&ctx, hmac_key);
     mbedtls_sha256_free(&ctx);
 
-    return mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), outk, 32, cred_id, cred_id_len - CRED_SILENT_TAG_LEN, outk);
+    int ret = mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), hmac_key, sizeof(hmac_key), cred_id, cred_id_len - CRED_SILENT_TAG_LEN, tag);
+    if (ret == 0) {
+        memcpy(outk, tag, CRED_SILENT_TAG_LEN);
+    }
+    mbedtls_platform_zeroize(hmac_key, sizeof(hmac_key));
+    mbedtls_platform_zeroize(tag, sizeof(tag));
+    return ret;
 }
 
 int credential_verify(uint8_t *cred_id, size_t cred_id_len, const uint8_t *rp_id_hash, bool silent) {
@@ -99,7 +106,8 @@ int credential_create(CborCharString *rpId,
     CborError error = CborNoError;
     uint8_t rp_id_hash[32];
     mbedtls_sha256((uint8_t *) rpId->data, rpId->len, rp_id_hash, 0);
-    cbor_encoder_init(&encoder, cred_id + 4 + 12, MAX_CRED_ID_LENGTH - (4 + 12 + 16), 0);
+    cbor_encoder_init(&encoder, cred_id + CRED_PROTO_LEN + CRED_IV_LEN,
+                      MAX_CRED_ID_LENGTH - CRED_PROTO_LEN - CRED_IV_LEN - CRED_TAG_LEN - CRED_SILENT_TAG_LEN, 0);
     CBOR_CHECK(cbor_encoder_create_map(&encoder, &mapEncoder,  CborIndefiniteLength));
     CBOR_APPEND_KEY_UINT_VAL_STRING(mapEncoder, 0x01, *rpId);
     CBOR_CHECK(cbor_encode_uint(&mapEncoder, 0x02));
@@ -155,6 +163,9 @@ int credential_create(CborCharString *rpId,
     }
     CBOR_CHECK(cbor_encoder_close_container(&encoder, &mapEncoder));
     size_t rs = cbor_encoder_get_buffer_size(&encoder, cred_id);
+    if (rs > MAX_CRED_ID_LENGTH - CRED_PROTO_LEN - CRED_IV_LEN - CRED_TAG_LEN - CRED_SILENT_TAG_LEN) {
+        CBOR_ERROR(CTAP2_ERR_LIMIT_EXCEEDED);
+    }
     *cred_id_len = CRED_PROTO_LEN + CRED_IV_LEN + (uint16_t)rs + CRED_TAG_LEN + CRED_SILENT_TAG_LEN;
     uint8_t key[32] = {0};
     credential_derive_chacha_key(key, (const uint8_t *)CRED_PROTO);
