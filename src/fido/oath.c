@@ -608,6 +608,8 @@ int cmd_set_otp_pin() {
     return SW_OK();
 }
 
+int cmd_verify_otp_pin();
+
 int cmd_change_otp_pin() {
     uint8_t hsh[33] = { 0 };
     file_t *ef_otp_pin = search_by_fid(EF_OTP_PIN, NULL, SPECIFY_EF);
@@ -622,15 +624,15 @@ int cmd_change_otp_pin() {
     if (pw.len == 0) {
         return SW_WRONG_LENGTH();
     }
-    double_hash_pin(pw.data, pw.len, hsh + 1);
-    if (memcmp(file_get_data(ef_otp_pin) + 1, hsh + 1, 32) != 0) {
-        return SW_SECURITY_STATUS_NOT_SATISFIED();
-    }
     if (asn1_find_tag(&ctxi, TAG_NEW_PASSWORD, &new_pw) == false) {
         return SW_INCORRECT_PARAMS();
     }
     if (new_pw.len == 0) {
         return SW_WRONG_LENGTH();
+    }
+    int verified = cmd_verify_otp_pin();
+    if (verified != 0x9000) {
+        return verified;
     }
     hsh[0] = MAX_OTP_COUNTER;
     double_hash_pin(new_pw.data, new_pw.len, hsh + 1);
@@ -640,6 +642,7 @@ int cmd_change_otp_pin() {
     }
     mbedtls_platform_zeroize(hsh, sizeof(hsh));
     low_flash_available();
+    oath_set_all_sessions_validated(false);
     return SW_OK();
 }
 
