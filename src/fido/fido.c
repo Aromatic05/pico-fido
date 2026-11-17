@@ -233,6 +233,7 @@ int x509_create_cert(mbedtls_ecdsa_context *ecdsa, uint8_t *buffer, size_t buffe
 }
 
 int load_keydev(uint8_t key[32]) {
+    mbedtls_platform_zeroize(key, 32);
     if (has_keydev_dec == false && !file_has_data(ef_keydev)) {
         return PICOKEY_ERR_MEMORY_FATAL;
     }
@@ -253,7 +254,7 @@ int load_keydev(uint8_t key[32]) {
         }
         else if (fid_size == 33 || fid_size == 61) {
             uint8_t format = *file_get_data(ef_keydev);
-            if (format == 0x01 || format == 0x02) { // Format indicator
+            if ((format == 0x01 && fid_size == 33) || (format == 0x02 && fid_size == 61)) {
                 if (format == 0x02) {
                     uint8_t tmp_key[61];
                     memcpy(tmp_key, file_get_data(ef_keydev), sizeof(tmp_key));
@@ -274,6 +275,12 @@ int load_keydev(uint8_t key[32]) {
                 }
                 mbedtls_platform_zeroize(kbase, sizeof(kbase));
             }
+            else {
+                return PICOKEY_WRONG_DATA;
+            }
+        }
+        else {
+            return PICOKEY_WRONG_DATA;
         }
     }
 

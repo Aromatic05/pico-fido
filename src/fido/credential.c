@@ -76,7 +76,10 @@ int credential_verify(uint8_t *cred_id, size_t cred_id_len, const uint8_t *rp_id
         if (proto == CRED_PROTO_22) {
             hdr_len += CRED_SILENT_TAG_LEN;
         }
-        credential_derive_chacha_key(key, cred_id);
+        ret = credential_derive_chacha_key(key, cred_id);
+        if (ret != PICOKEY_OK) {
+            return ret;
+        }
         mbedtls_chachapoly_context chatx;
         mbedtls_chachapoly_init(&chatx);
         mbedtls_chachapoly_setkey(&chatx, key);
@@ -171,7 +174,9 @@ int credential_create(CborCharString *rpId,
     }
     *cred_id_len = CRED_PROTO_LEN + CRED_IV_LEN + (uint16_t)rs + CRED_TAG_LEN + CRED_SILENT_TAG_LEN;
     uint8_t key[32] = {0};
-    credential_derive_chacha_key(key, (const uint8_t *)CRED_PROTO);
+    if (credential_derive_chacha_key(key, (const uint8_t *)CRED_PROTO) != PICOKEY_OK) {
+        CBOR_ERROR(CTAP1_ERR_OTHER);
+    }
     uint8_t iv[CRED_IV_LEN] = {0};
     random_gen(NULL, iv, sizeof(iv));
     mbedtls_chachapoly_context chatx;
