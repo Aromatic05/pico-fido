@@ -682,6 +682,9 @@ int cmd_verify_otp_pin() {
 }
 
 int cmd_verify_hotp() {
+    if (oath_session()->validated == false) {
+        return SW_SECURITY_STATUS_NOT_SATISFIED();
+    }
     asn1_ctx_t ctxi, key = { 0 }, chal = { 0 }, name = { 0 }, code = { 0 };
     asn1_ctx_init(apdu.data, (uint16_t)apdu.nc, &ctxi);
     uint32_t code_int = 0;
@@ -694,6 +697,11 @@ int cmd_verify_hotp() {
     }
     asn1_ctx_t ctxe;
     asn1_ctx_init(file_get_data(ef), file_get_size(ef), &ctxe);
+    asn1_ctx_t prop = { 0 };
+    if (asn1_find_tag(&ctxe, TAG_PROPERTY, &prop) && prop.len > 0 &&
+        (prop.data[0] & PROP_TOUCH) && wait_button_pressed()) {
+        return SW_CONDITIONS_NOT_SATISFIED();
+    }
     if (asn1_find_tag(&ctxe, TAG_KEY, &key) == false) {
         return SW_INCORRECT_PARAMS();
     }
