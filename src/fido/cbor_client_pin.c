@@ -890,6 +890,18 @@ int cbor_client_pin(const uint8_t *data, size_t len) {
 
         pin_derive_session(paddedNewPin, 16, session_pin);
 
+        if (file_has_data(ef_keydev) && file_get_size(ef_keydev) == 61 &&
+            *file_get_data(ef_keydev) == 0x02) {
+            ret = load_keydev(keydev);
+            if (ret != PICOKEY_OK) {
+                CBOR_ERROR(CTAP2_ERR_PROCESSING);
+            }
+            ret = encrypt_keydev_f1(keydev);
+            if (ret != PICOKEY_OK) {
+                CBOR_ERROR(CTAP2_ERR_PROCESSING);
+            }
+        }
+
         pin_data[0] = MAX_PIN_RETRIES;
         new_pin_mismatches = 0;
 
