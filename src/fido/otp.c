@@ -239,6 +239,7 @@ int otp_button_pressed(uint8_t slot) {
     if (otp_config->tkt_flags & OATH_HOTP) {
         uint8_t tmp_key[KEY_SIZE + 2];
         tmp_key[0] = 0x01;
+        tmp_key[1] = otp_config->cfg_flags & OATH_HOTP8 ? 8 : 6;
         memcpy(tmp_key + 2, otp_config->aes_key, KEY_SIZE);
         uint64_t imf = 0;
         const uint8_t *p = data + otp_config_size;
@@ -253,7 +254,7 @@ int otp_button_pressed(uint8_t slot) {
         int ret = calculate_oath(1, tmp_key, sizeof(tmp_key), chal, sizeof(chal));
         if (ret == PICOKEY_OK) {
             uint32_t base = otp_config->cfg_flags & OATH_HOTP8 ? 1e8 : 1e6;
-            uint32_t number = get_uint16_t_be(res_APDU + 2);
+            uint32_t number = get_uint32_t_be(res_APDU + 2);
             number %= base;
             char number_str[9];
             if (otp_config->cfg_flags & OATH_HOTP8) {
