@@ -176,24 +176,41 @@ int cmd_put() {
     if (key.len < 2) {
         return SW_WRONG_DATA();
     }
+    const uint8_t *cred_data = apdu.data;
+    uint16_t cred_len = (uint16_t)apdu.nc;
+    uint8_t normalized[PICO_KEYS_FLASH_SECTOR_SIZE];
     if ((key.data[0] & OATH_TYPE_MASK) == OATH_TYPE_HOTP) {
+        size_t extra = 0;
         if (asn1_find_tag(&ctxi, TAG_IMF, &imf) == false) {
-            memcpy(apdu.data + apdu.nc, "\x7a\x08\x00\x00\x00\x00\x00\x00\x00\x00", 10);
-            apdu.nc += 10;
+            extra = 10;
         }
         else { //prepend zero-valued bytes
             if (imf.len < 8) {
-                memmove(imf.data + (8 - imf.len), imf.data, imf.len);
-                memset(imf.data, 0, 8 - imf.len);
-                *(imf.data - 1) = 8;
-                apdu.nc += (8 - imf.len);
+                extra = 8 - imf.len;
             }
-
+        }
+        if (extra > 0) {
+            if (cred_len + extra > sizeof(normalized)) {
+                return SW_WRONG_LENGTH();
+            }
+            memcpy(normalized, cred_data, cred_len);
+            if (imf.data == NULL) {
+                memcpy(normalized + cred_len, "\x7a\x08\x00\x00\x00\x00\x00\x00\x00\x00", 10);
+            }
+            else {
+                size_t offset = (size_t)(imf.data - cred_data);
+                memmove(normalized + offset + extra, normalized + offset, cred_len - offset);
+                memmove(normalized + offset + (8 - imf.len), normalized + offset, imf.len);
+                memset(normalized + offset, 0, 8 - imf.len);
+                normalized[offset - 1] = 8;
+            }
+            cred_len += (uint16_t)extra;
+            cred_data = normalized;
         }
     }
     file_t *ef = find_oath_cred(name.data, name.len);
     if (file_has_data(ef)) {
-        if (file_put_data(ef, apdu.data, (uint16_t)apdu.nc) != PICOKEY_OK) {
+        if (file_put_data(ef, cred_data, cred_len) != PICOKEY_OK) {
             return SW_EXEC_ERROR();
         }
         low_flash_available();
@@ -204,7 +221,7 @@ int cmd_put() {
             if (!file_has_data(tef)) {
                 tef = file_new((uint16_t)(EF_OATH_CRED + i));
                 if (tef == NULL ||
-                    file_put_data(tef, apdu.data, (uint16_t)apdu.nc) != PICOKEY_OK) {
+                    file_put_data(tef, cred_data, cred_len) != PICOKEY_OK) {
                     return SW_EXEC_ERROR();
                 }
                 low_flash_available();
