@@ -494,7 +494,7 @@ int cmd_otp() {
         return otp_config_commit_status(_is_otp);
     }
     else if (p1 == 0x04 || p1 == 0x05) { // Update slot
-        if (apdu.nc < otp_config_size) {
+        if (apdu.nc != otp_config_size + ACC_CODE_SIZE) {
             return SW_WRONG_LENGTH();
         }
         otp_config_t *odata = (otp_config_t *) apdu.data;
@@ -507,6 +507,9 @@ int cmd_otp() {
         }
         file_t *ef = search_dynamic_file(slot);
         if (file_has_data(ef)) {
+            if (file_get_size(ef) != otp_config_size + 8) {
+                return SW_WRONG_LENGTH();
+            }
             otp_config_t *otpc = (otp_config_t *) file_get_data(ef);
             if (memcmp(otpc->acc_code, apdu.data + otp_config_size, ACC_CODE_SIZE) != 0) {
                 return SW_SECURITY_STATUS_NOT_SATISFIED();
@@ -524,7 +527,10 @@ int cmd_otp() {
             else {
                 odata->cfg_flags = otpc->cfg_flags;
             }
-            if (file_put_data(ef, apdu.data, otp_config_size) != PICOKEY_OK) {
+            uint8_t updated[otp_config_size + 8];
+            memcpy(updated, apdu.data, otp_config_size);
+            memcpy(updated + otp_config_size, file_get_data(ef) + otp_config_size, 8);
+            if (file_put_data(ef, updated, sizeof(updated)) != PICOKEY_OK) {
                 return SW_EXEC_ERROR();
             }
             low_flash_available();
