@@ -42,6 +42,7 @@ int cbor_config(const uint8_t *data, size_t len);
 int cbor_vendor(const uint8_t *data, size_t len);
 int cbor_large_blobs(const uint8_t *data, size_t len);
 extern void reset_gna_state();
+extern int pinUvAuthTokenUsageTimerObserver();
 
 extern int cmd_read_config();
 
@@ -55,6 +56,7 @@ uint8_t *cbor_response = NULL;
 static fido_transport_t cbor_transport = FIDO_TRANSPORT_USB;
 
 int cbor_parse(uint8_t cmd, const uint8_t *data, size_t len) {
+    pinUvAuthTokenUsageTimerObserver();
     if (len == 0 && cmd == CTAPHID_CBOR) {
         return CTAP1_ERR_INVALID_LEN;
     }

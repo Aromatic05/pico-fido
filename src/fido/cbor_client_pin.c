@@ -306,22 +306,18 @@ int getPublicKey() {
 }
 
 int pinUvAuthTokenUsageTimerObserver() {
-    if (usage_timer == 0) {
-        return -1;
+    if (!paut.in_use) {
+        return 0;
     }
-    if (usage_timer + max_usage_time_period > board_millis()) {
-        if (user_present_time_limit == 0 ||
-            user_present_time_limit + TRANSPORT_TIME_LIMIT < board_millis()) {
-            clearUserPresentFlag();
-        }
-        if (paut.in_use == true) {
-            if (initial_usage_time_limit == 0 ||
-                initial_usage_time_limit + TRANSPORT_TIME_LIMIT < board_millis()) {
-                stopUsingPinUvAuthToken();
-                return 1;
-            }
-        }
-        // TO DO: implement a rolling timer
+    uint32_t now = board_millis();
+    if ((uint32_t)(now - usage_timer) >= max_usage_time_period ||
+        (uint32_t)(now - initial_usage_time_limit) >= TRANSPORT_TIME_LIMIT) {
+        stopUsingPinUvAuthToken();
+        return 1;
+    }
+    if (user_present_time_limit == 0 ||
+        (uint32_t)(now - user_present_time_limit) >= TRANSPORT_TIME_LIMIT) {
+        clearUserPresentFlag();
     }
     return 0;
 }
