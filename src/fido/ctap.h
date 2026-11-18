@@ -36,6 +36,7 @@ extern "C" {
 #define CTAP_CTR_SIZE            4       // Size of counter field
 #define CTAP_APPID_SIZE          32      // Size of application id
 #define CTAP_CHAL_SIZE           32      // Size of challenge
+#define CTAP_MAX_PIN_BYTES       63      // ClientPIN's 64-byte field must end in zero
 
 #define ENC_SIZE(x)             ((x + 7) & 0xfff8)
 

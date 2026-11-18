@@ -546,7 +546,7 @@ int cbor_client_pin(const uint8_t *data, size_t len) {
         if (ret != 0) {
             CBOR_ERROR(CTAP2_ERR_PIN_AUTH_INVALID);
         }
-        if (paddedNewPin[63] != 0) {
+        if (paddedNewPin[CTAP_MAX_PIN_BYTES] != 0) {
             CBOR_ERROR(CTAP2_ERR_PIN_POLICY_VIOLATION);
         }
         uint8_t pin_len = 0;
@@ -695,7 +695,7 @@ int cbor_client_pin(const uint8_t *data, size_t len) {
         if (ret != 0) {
             CBOR_ERROR(CTAP2_ERR_PIN_AUTH_INVALID);
         }
-        if (paddedNewPin[63] != 0) {
+        if (paddedNewPin[CTAP_MAX_PIN_BYTES] != 0) {
             CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
         }
         uint8_t pin_len = 0;

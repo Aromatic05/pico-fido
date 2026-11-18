@@ -285,7 +285,7 @@ int cbor_config(const uint8_t *data, size_t len) {
         if (newMinPinLength == 0) {
             newMinPinLength = currentMinPinLen;
         }
-        else if (newMinPinLength > 0 && newMinPinLength < currentMinPinLen) {
+        else if (newMinPinLength < currentMinPinLen || newMinPinLength > CTAP_MAX_PIN_BYTES) {
             CBOR_ERROR(CTAP2_ERR_PIN_POLICY_VIOLATION);
         }
         if (forceChangePin == ptrue && !file_has_data(ef_pin)) {
