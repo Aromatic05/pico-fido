@@ -243,8 +243,7 @@ int cmd_delete() {
     if (asn1_find_tag(&ctxi, TAG_NAME, &ctxo) == true) {
         file_t *ef = find_oath_cred(ctxo.data, ctxo.len);
         if (ef) {
-            delete_file(ef);
-            return SW_OK();
+            return delete_file(ef) == PICOKEY_OK ? SW_OK() : SW_EXEC_ERROR();
         }
         return SW_DATA_INVALID();
     }
@@ -268,18 +267,15 @@ int cmd_set_code() {
     if (oath_session()->validated == false) {
         return SW_SECURITY_STATUS_NOT_SATISFIED();
     }
-    if (apdu.nc == 0) {
-        delete_file(search_dynamic_file(EF_OATH_CODE));
-        oath_set_all_sessions_validated(true);
-        return SW_OK();
-    }
     asn1_ctx_t ctxi, key = { 0 }, chal = { 0 }, resp = { 0 };
     asn1_ctx_init(apdu.data, (uint16_t)apdu.nc, &ctxi);
-    if (asn1_find_tag(&ctxi, TAG_KEY, &key) == false) {
+    if (apdu.nc != 0 && !asn1_find_tag(&ctxi, TAG_KEY, &key)) {
         return SW_INCORRECT_PARAMS();
     }
     if (key.len == 0) {
-        delete_file(search_dynamic_file(EF_OATH_CODE));
+        if (delete_file(search_dynamic_file(EF_OATH_CODE)) != PICOKEY_OK) {
+            return SW_EXEC_ERROR();
+        }
         oath_set_all_sessions_validated(true);
         return SW_OK();
     }
