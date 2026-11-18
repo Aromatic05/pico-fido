@@ -199,6 +199,9 @@ err:
         if (error == CborErrorImproperValue) {
             return CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
         }
+        if (error == CborErrorOutOfMemory) {
+            return CTAP2_ERR_PROCESSING;
+        }
         return error;
     }
     return 0;
