@@ -119,16 +119,14 @@ int cbor_large_blobs(const uint8_t *data, size_t len) {
             if (length < 17) {
                 CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
             }
-            expectedLength = length;
-            expectedNextOffset = 0;
         }
         else {
             if (length != 0) {
                 CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
             }
-        }
-        if (offset != expectedNextOffset) {
-            CBOR_ERROR(CTAP1_ERR_INVALID_SEQ);
+            if (offset != expectedNextOffset) {
+                CBOR_ERROR(CTAP1_ERR_INVALID_SEQ);
+            }
         }
         if (pinUvAuthParam.present == false) {
             CBOR_ERROR(CTAP2_ERR_PUAT_REQUIRED);
@@ -148,18 +146,21 @@ int cbor_large_blobs(const uint8_t *data, size_t len) {
         if (!(paut.permissions & CTAP_PERMISSION_LBW)) {
             CBOR_ERROR(CTAP2_ERR_PIN_AUTH_INVALID);
         }
-        if (offset + set.len > expectedLength) {
+        uint64_t write_length = offset == 0 ? length : expectedLength;
+        if (offset + set.len > write_length) {
             CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
         }
         if (offset == 0) {
-            memset(temp_lba, 0, sizeof(temp_lba));
+            reset_large_blob_state();
+            expectedLength = length;
         }
         memcpy(temp_lba + expectedNextOffset, set.data, set.len);
         expectedNextOffset += set.len;
         if (expectedNextOffset == expectedLength) {
             uint8_t sha[32];
             mbedtls_sha256(temp_lba, expectedLength - 16, sha, 0);
-            if (expectedLength > 17 && memcmp(sha, temp_lba + expectedLength - 16, 16) != 0) {
+            if (memcmp(sha, temp_lba + expectedLength - 16, 16) != 0) {
+                reset_large_blob_state();
                 CBOR_ERROR(CTAP2_ERR_INTEGRITY_FAILURE);
             }
             if (file_put_data(ef_largeblob, temp_lba,
