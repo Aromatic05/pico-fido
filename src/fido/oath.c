@@ -762,6 +762,10 @@ int cmd_rename() {
     if (name.len == new_name.len && memcmp(name.data, new_name.data, name.len) == 0) {
         return SW_WRONG_DATA();
     }
+    /* Extended LIST prefixes the name with the algorithm and appends properties. */
+    if (new_name.len > UINT8_MAX - 2) {
+        return SW_WRONG_LENGTH();
+    }
     file_t *ef = find_oath_cred(name.data, name.len);
     if (file_has_data(ef) == false) {
         return SW_DATA_INVALID();
@@ -769,18 +773,27 @@ int cmd_rename() {
     uint8_t *fdata = file_get_data(ef);
     uint16_t fsize = file_get_size(ef);
     asn1_ctx_init(fdata, fsize, &ctxi);
-    if (asn1_find_tag(&ctxi, TAG_NAME, &name) == false) {
-        return SW_WRONG_DATA();
-    }
-    size_t new_size = (size_t)fsize - name.len + new_name.len;
+    uint8_t *next = fdata, *name_tlv;
+    uint16_t tag;
+    do {
+        name_tlv = next;
+        if (!walk_tlv(&ctxi, &next, &tag, NULL, NULL)) {
+            return SW_WRONG_DATA();
+        }
+    } while (tag != TAG_NAME);
+    size_t prefix = (size_t)(name_tlv - fdata);
+    size_t suffix = (size_t)(fdata + fsize - next);
+    size_t new_size = prefix + asn1_len_tag(TAG_NAME, new_name.len) + suffix;
     if (new_size > PICO_KEYS_FLASH_SECTOR_SIZE) {
         return SW_FILE_FULL();
     }
     uint8_t new_data[PICO_KEYS_FLASH_SECTOR_SIZE] = {0};
-    memcpy(new_data, fdata, name.data - fdata);
-    *(new_data + (name.data - fdata) - 1) = new_name.len;
-    memcpy(new_data + (name.data - fdata), new_name.data, new_name.len);
-    memcpy(new_data + (name.data - fdata) + new_name.len, name.data + name.len, fsize - (name.data + name.len - fdata));
+    memcpy(new_data, fdata, prefix);
+    uint8_t *out = new_data + prefix;
+    *out++ = TAG_NAME;
+    out += format_tlv_len(new_name.len, out);
+    memcpy(out, new_name.data, new_name.len);
+    memcpy(out + new_name.len, next, suffix);
     if (file_put_data(ef, new_data, (uint16_t)new_size) != PICOKEY_OK) {
         return SW_EXEC_ERROR();
     }
